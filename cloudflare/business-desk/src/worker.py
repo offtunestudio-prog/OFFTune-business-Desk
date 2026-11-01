@@ -443,21 +443,39 @@ async def orders(request: Request):
         "JOIN customers c ON c.id=o.customer_id LEFT JOIN users u ON u.id=o.employee_id "
         "WHERE o.status!='void'" + scope + " ORDER BY o.order_date DESC,o.id DESC"
     ).bind(*binds).all()
-    result = []
-    for order in _rows(rows):
+    visible_orders = _rows(rows)
+    order_ids = [order["id"] for order in visible_orders]
+    items_by_order = {}
+    received_by_order = {}
+    for start in range(0, len(order_ids), 300):
+        batch_ids = order_ids[start:start + 300]
+        placeholders = ",".join("?" for _ in batch_ids)
         item_rows = await db.prepare(
-            "SELECT oi.id order_item_id,p.id product_id,p.name,p.product_type,oi.quantity,oi.unit_price_minor,"
+            "SELECT oi.order_id,oi.id order_item_id,p.id product_id,p.name,p.product_type,oi.quantity,oi.unit_price_minor,"
             "oi.discount_minor,oi.line_total_minor,b.id batch_id,b.name batch_name FROM order_items oi "
             "JOIN products p ON p.id=oi.product_id LEFT JOIN batches b ON b.id=oi.batch_id "
-            "WHERE oi.order_id=? ORDER BY oi.id"
-        ).bind(order["id"]).all()
-        receipts = await _first(db.prepare(
-            "SELECT COALESCE(SUM(CASE WHEN payment_type='receipt' THEN amount_minor ELSE -amount_minor END),0) n "
-            "FROM payments WHERE order_id=?"
-        ).bind(order["id"]))
-        received = int(receipts["n"] or 0)
+            "WHERE oi.order_id IN (" + placeholders + ") ORDER BY oi.order_id,oi.id"
+        ).bind(*batch_ids).all()
+        for item in _rows(item_rows):
+            items_by_order.setdefault(item["order_id"], []).append(item)
+        payment_rows = await db.prepare(
+            "SELECT order_id,COALESCE(SUM(CASE WHEN payment_type='receipt' THEN amount_minor ELSE -amount_minor END),0) n "
+            "FROM payments WHERE order_id IN (" + placeholders + ") GROUP BY order_id"
+        ).bind(*batch_ids).all()
+        received_by_order.update({row["order_id"]: int(row["n"] or 0) for row in _rows(payment_rows)})
+    manager_team_ids = set()
+    if user["role"] == "manager":
+        team_rows = await db.prepare(
+            "WITH RECURSIVE team(id) AS (SELECT id FROM users WHERE manager_id=? AND is_active=1 "
+            "UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) "
+            "SELECT id FROM team"
+        ).bind(user["id"]).all()
+        manager_team_ids = {row["id"] for row in _rows(team_rows)}
+    result = []
+    for order in visible_orders:
+        received = received_by_order.get(order["id"], 0)
         total = int(order["total_minor"] or 0)
-        items = _rows(item_rows)
+        items = items_by_order.get(order["id"], [])
         weights = [max(0, int(item["line_total_minor"] or 0)) for item in items]
         denominator = sum(weights) or 1
         alloc_total = max(0, total)
@@ -472,14 +490,7 @@ async def orders(request: Request):
                 "unit_price": _money(item["unit_price_minor"]), "discount": _money(item["discount_minor"]),
                 "order_value": _money(expected_part), "received": _money(received_part),
                 "pending": _money(max(0, expected_part - received_part))})
-        manager_can_manage = False
-        if user["role"] == "manager" and order["employee_id"] is not None:
-            team_access = await _first(db.prepare(
-                "WITH RECURSIVE team(id) AS (SELECT id FROM users WHERE manager_id=? AND is_active=1 "
-                "UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) "
-                "SELECT EXISTS(SELECT 1 FROM team WHERE id=?) member"
-            ).bind(user["id"], order["employee_id"]))
-            manager_can_manage = bool(team_access and team_access["member"])
+        manager_can_manage = user["role"] == "manager" and order["employee_id"] in manager_team_ids
         base = {"id": order["id"], "customer_id": order["customer_id"], "employee_id": order["employee_id"],
                 "can_manage": user["role"] == "owner" or manager_can_manage or (user["role"] == "employee" and order["employee_id"] == user["id"]),
                 "order_no": order["order_no"], "date": order["order_date"],
