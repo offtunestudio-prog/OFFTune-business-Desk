@@ -1,4 +1,4 @@
-name = "offtune-business-desk"
+name = "offtune-business-desk-worker"
 main = "src/worker.py"
 compatibility_date = "2026-11-01"
 compatibility_flags = ["python_workers"]
