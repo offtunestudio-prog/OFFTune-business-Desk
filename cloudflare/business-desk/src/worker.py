@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 52963)
-Total output lines: 3230
-
 """Cloudflare Worker entry point for OFFTune Business Desk."""
 
 import hashlib
@@ -11,7 +8,8 @@ import hmac
 import json
 import secrets
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from calendar import monthrange
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from fastapi import FastAPI, Request
@@ -792,6 +790,101 @@ async def installments(request: Request):
             "amount": _money(row["amount_minor"]), "paid": _money(amount_paid), "balance": _money(balance),
             "status": "paid" if balance == 0 else "overdue" if row["due_date"] < date.today().isoformat() else "upcoming"})
     return result
+
+
+@app.post("/api/installments/update")
+async def update_installment(request: Request):
+    user, error = await _require_user(request, ("owner", "manager", "employee"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        installment_id = int(data.get("installment_id", 0))
+        due_date = date.fromisoformat(str(data.get("due_date", ""))).isoformat()
+        reason = str(data.get("reason", "")).strip()[:500]
+        outcome = str(data.get("outcome", "schedule_change")).strip()[:40]
+        promised_raw = str(data.get("promised_date", "")).strip()
+        promised = date.fromisoformat(promised_raw).isoformat() if promised_raw else None
+        followup_raw = str(data.get("followup_at", "")).strip()
+        followup = datetime.fromisoformat(followup_raw).strftime("%Y-%m-%dT%H:%M") if followup_raw else None
+        allowed = {"schedule_change", "contacted", "no_answer", "call_back", "not_ready", "promised", "rescheduled", "paid_later"}
+        if outcome not in allowed:
+            raise ValueError("Choose a valid follow-up outcome")
+        if outcome in {"no_answer", "call_back", "not_ready", "rescheduled", "paid_later"} and not followup:
+            raise ValueError("Choose the next follow-up date and time")
+        if outcome in {"promised", "paid_later"} and not promised:
+            raise ValueError("Add the date the student promised to pay")
+        has_amount = "amount" in data
+        new_amount = _minor(data.get("amount")) if has_amount else None
+        if has_amount and new_amount <= 0:
+            raise ValueError("Scheduled amount must be greater than zero")
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Check the payment schedule details"}, status_code=400)
+    db = _env(request).DB
+    row = await _first(db.prepare("SELECT i.id,i.order_id,i.installment_no,i.amount_minor,o.employee_id,o.installment_count FROM installments i JOIN orders o ON o.id=i.order_id WHERE i.id=? AND o.status='active'").bind(installment_id))
+    if not row:
+        return JSONResponse({"error": "Payment schedule step not found"}, status_code=404)
+    if user["role"] == "employee" and row["employee_id"] != user["id"]:
+        return JSONResponse({"error": "That student is outside your workspace"}, status_code=403)
+    if user["role"] == "manager":
+        allowed_owner = await _first(db.prepare("WITH RECURSIVE team(id) AS (SELECT id FROM users WHERE manager_id=? AND is_active=1 UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) SELECT EXISTS(SELECT 1 FROM team WHERE id=?) member").bind(user["id"], row["employee_id"]))
+        if row["employee_id"] != user["id"] and not allowed_owner["member"]:
+            return JSONResponse({"error": "That order is outside your team"}, status_code=403)
+    if user["role"] == "employee" and has_amount:
+        return JSONResponse({"error": "Only the owner or manager can change a scheduled amount"}, status_code=403)
+    paid = await _first(db.prepare("SELECT COALESCE(SUM(amount_minor),0) amount FROM payment_allocations WHERE installment_id=?").bind(installment_id))
+    if has_amount and new_amount < int(paid["amount"] or 0):
+        return JSONResponse({"error": "Scheduled amount cannot be lower than the amount already paid"}, status_code=400)
+    statements = []
+    if has_amount:
+        delta = new_amount - int(row["amount_minor"])
+        if delta:
+            other_rows = _rows(await db.prepare("SELECT i.id,i.amount_minor,COALESCE(SUM(a.amount_minor),0) paid FROM installments i LEFT JOIN payment_allocations a ON a.installment_id=i.id WHERE i.order_id=? AND i.id<>? GROUP BY i.id ORDER BY i.installment_no DESC").bind(row["order_id"], installment_id).all())
+            open_rows = [item for item in other_rows if int(item["amount_minor"])-int(item["paid"]) > 0]
+            if not open_rows:
+                return JSONResponse({"error": "This order has no other unpaid schedule to balance against"}, status_code=400)
+            if delta > 0:
+                if sum(int(item["amount_minor"])-int(item["paid"]) for item in open_rows) < delta:
+                    return JSONResponse({"error": "The other unpaid installments do not have enough balance for this change"}, status_code=400)
+                remaining = delta
+                for item in open_rows:
+                    available = int(item["amount_minor"])-int(item["paid"])
+                    take = min(available, remaining)
+                    if take:
+                        statements.append(db.prepare("UPDATE installments SET amount_minor=? WHERE id=?").bind(int(item["amount_minor"])-take, item["id"]))
+                        remaining -= take
+                    if not remaining:
+                        break
+            else:
+                first = open_rows[0]
+                statements.append(db.prepare("UPDATE installments SET amount_minor=? WHERE id=?").bind(int(first["amount_minor"])-delta, first["id"]))
+        statements.append(db.prepare("UPDATE installments SET amount_minor=? WHERE id=?").bind(new_amount, installment_id))
+    statements.append(db.prepare("UPDATE installments SET due_date=?,reason=?,promised_date=?,followup_outcome=?,followup_at=? WHERE id=?").bind(
+        due_date, reason, promised, outcome, followup, installment_id))
+    statements.append(db.prepare("INSERT INTO followup_logs(installment_id,user_id,outcome,note,promised_date,next_followup_at) VALUES(?,?,?,?,?,?)").bind(
+        installment_id, user["id"], outcome, reason, promised, followup))
+    if int(row["installment_no"]) == 1 and int(row["installment_count"] or 0) > 0:
+        anchor = date.fromisoformat(due_date)
+        statements.extend([
+            db.prepare("UPDATE orders SET first_due_date=?,emi_due_day=? WHERE id=?").bind(due_date, anchor.day, row["order_id"]),
+        ])
+        later = _rows(await db.prepare("SELECT id,installment_no,amount_minor FROM installments WHERE order_id=? AND installment_no>1 ORDER BY installment_no").bind(row["order_id"]).all())
+        for scheduled in later:
+            paid_later = await _first(db.prepare("SELECT COALESCE(SUM(amount_minor),0) amount FROM payment_allocations WHERE installment_id=?").bind(scheduled["id"]))
+            if int(paid_later["amount"] or 0) >= int(scheduled["amount_minor"]):
+                continue
+            month_index = anchor.month - 1 + int(scheduled["installment_no"]) - 1
+            year = anchor.year + month_index // 12
+            month = month_index % 12 + 1
+            scheduled_day = min(anchor.day, monthrange(year, month)[1])
+            next_due = date(year, month, scheduled_day).isoformat()
+            statements.append(db.prepare("UPDATE installments SET due_date=? WHERE id=?").bind(next_due, scheduled["id"]))
+    statements.append(db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'updated','installment',?)").bind(user["id"], installment_id))
+    try:
+        await db.batch(statements)
+    except Exception:
+        return JSONResponse({"error": "The payment schedule was not changed; refresh and retry"}, status_code=409)
+    return {"ok": True}
 
 
 @app.post("/api/payments")
@@ -1638,7 +1731,202 @@ async def update_reminder_settings(request: Request):
         statements.append(db.prepare("INSERT INTO settings(key,value) VALUES('emi_reminder_stages',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(plan_json))
     if types_json is not None:
         statements.append(db.prepare("INSERT INTO settings(key,value) VALUES('emi_reminder_types',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(types_json))
-    statements.append(db.prepare("INSERT INTO audit_log(a…2963 tokens truncated…post("/api/incentive/team-rules")
+    statements.append(db.prepare("INSERT INTO audit_log(actor_id,action,entity) VALUES(?,'updated','reminder_email_rules')").bind(user["id"]))
+    try:
+        await db.batch(statements)
+    except Exception:
+        return JSONResponse({"error": "Reminder settings were not saved; retry the update"}, status_code=409)
+    return {"ok": True, "enabled": False, "send_time": send_time, "sender_verified": False,
+        "emi_plan": await _reminder_stages(db), "emi_types": await _reminder_types(db),
+        "invoice_auto_enabled": await _setting(db, "invoice_auto_installment_enabled", "1") == "1",
+        "invoice_auto_lead_days": int(await _setting(db, "invoice_auto_lead_days", "5"))}
+
+
+@app.get("/api/analytics/courses")
+@app.get("/api/analytics/batches")
+async def sales_analytics(request: Request):
+    user, error = await _require_user(request, ("owner", "manager", "employee"))
+    if error:
+        return error
+    by_batch = request.url.path.endswith("/batches")
+    db = _env(request).DB
+    groups = {}
+    def group_for(key, name):
+        if key not in groups:
+            groups[key] = {"name": name, "expected": 0, "received": 0, "pending": 0, "orders": set(), "customers": set()}
+        return groups[key]
+    order_rows = _rows(await db.prepare(
+        "SELECT o.id,o.customer_id,o.total_minor,COALESCE(SUM(CASE WHEN p.payment_type='receipt' THEN p.amount_minor ELSE -p.amount_minor END),0) received "
+        "FROM orders o LEFT JOIN payments p ON p.order_id=o.id WHERE o.status='active' GROUP BY o.id"
+    ).all())
+    for order in order_rows:
+        items = _rows(await db.prepare(
+            "SELECT oi.product_id,oi.batch_id,oi.line_total_minor,p.name product_name,p.product_type,b.name batch_name "
+            "FROM order_items oi JOIN products p ON p.id=oi.product_id LEFT JOIN batches b ON b.id=oi.batch_id "
+            "WHERE oi.order_id=? ORDER BY oi.id"
+        ).bind(order["id"]).all())
+        if by_batch:
+            items = [item for item in items if item["product_type"] == "course"]
+        if not items:
+            continue
+        weights = [max(0, int(item["line_total_minor"] or 0)) for item in items]
+        denominator = sum(weights) or 1
+        def split(amount):
+            total = max(0, int(amount or 0))
+            shares = [(total * weight) // denominator for weight in weights]
+            remainder = total - sum(shares)
+            indexes = sorted(range(len(weights)), key=lambda index: ((total * weights[index]) % denominator, -index), reverse=True)
+            for index in indexes[:remainder]:
+                shares[index] += 1
+            return shares
+        expected = split(order["total_minor"])
+        received = split(min(int(order["total_minor"] or 0), max(0, int(order["received"] or 0))))
+        for ix, item in enumerate(items):
+            key = item["batch_id"] if by_batch else item["product_id"]
+            label = (item["batch_name"] or "Not assigned") if by_batch else item["product_name"]
+            group = group_for(key, label)
+            group["expected"] += expected[ix]
+            group["received"] += received[ix]
+            group["pending"] += max(0, expected[ix] - received[ix])
+            group["orders"].add(order["id"])
+            group["customers"].add(order["customer_id"])
+    if by_batch:
+        for batch in _rows(await db.prepare("SELECT id,name FROM batches ORDER BY name").all()):
+            group_for(batch["id"], batch["name"])
+        return [{"batch_id": key, "name": value["name"], "students": len(value["customers"]), "orders": len(value["orders"]),
+            **({"expected": _money(value["expected"]), "received": _money(value["received"])} if user["role"] == "owner" else {}),
+            "pending": _money(value["pending"])} for key, value in sorted(groups.items(), key=lambda pair: pair[1]["name"].lower())]
+    if user["role"] == "owner":
+        for product in _rows(await db.prepare("SELECT id,name FROM products WHERE product_type='course' ORDER BY name").all()):
+            group_for(product["id"], product["name"])
+    return [{"product_id": key, "name": value["name"], "students": len(value["customers"]), "orders": len(value["orders"]),
+        **({"expected": _money(value["expected"]), "received": _money(value["received"])} if user["role"] == "owner" else {}),
+        "pending": _money(value["pending"])} for key, value in sorted(groups.items(), key=lambda pair: pair[1]["name"].lower())]
+
+
+@app.get("/api/audit")
+async def audit_history(request: Request):
+    _, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    rows = await _env(request).DB.prepare("SELECT a.occurred_at,a.action,a.entity,a.entity_id,u.name actor FROM audit_log a LEFT JOIN users u ON u.id=a.actor_id ORDER BY a.id DESC LIMIT 250").all()
+    return [{"date": row["occurred_at"], "actor": row["actor"] or "System", "action": row["action"],
+        "entity": row["entity"], "entity_id": row["entity_id"]} for row in _rows(rows)]
+
+
+@app.get("/api/backup")
+async def export_backup(request: Request):
+    _, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    db = _env(request).DB
+    tables = ("products", "batches", "customers", "orders", "order_items", "installments", "followup_logs", "payments",
+        "payment_allocations", "expenses", "commission_events", "commission_payouts", "commission_payout_allocations", "invoices",
+        "invoice_profiles", "invoice_items", "targets", "manager_incentive_rules", "target_week_allocations", "target_course_targets",
+        "target_course_week_allocations", "target_conversion_reports", "team_messages", "email_outbox", "razorpay_payment_links",
+        "razorpay_receipts", "audit_log", "designations")
+    exported = {}
+    for table in tables:
+        exported[table] = _rows(await db.prepare(f"SELECT * FROM {table}").all())
+    users = await db.prepare("SELECT id,name,email,role,job_title,avatar_data,manager_id,is_active,created_at FROM users").all()
+    exported["users"] = _rows(users)
+    settings = _rows(await db.prepare("SELECT key,value FROM settings").all())
+    # Credentials belong in provider secret stores and are never bundled into a workspace export.
+    exported["settings"] = [row for row in settings if not any(term in row["key"].lower() for term in ("key", "secret", "token", "password", "smtp"))]
+    return {"product": "OFFTune Business Desk", "schema_version": 1,
+        "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "data": exported,
+        "security_note": "API credentials, password hashes and active sessions are excluded."}
+
+
+@app.get("/api/reports/monthly")
+async def monthly_report(request: Request):
+    user, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    db = _env(request).DB
+    today = date.today().replace(day=1)
+    months = []
+    for offset in range(17, -1, -1):
+        total_month = today.year * 12 + today.month - 1 - offset
+        months.append(f"{total_month // 12:04d}-{total_month % 12 + 1:02d}")
+    start = months[0] + "-01"
+    end = (date.today() + timedelta(days=1)).isoformat()
+    conv_rows = await db.prepare("SELECT substr(order_date,1,7) month,COUNT(*) conversions FROM orders WHERE status='active' AND order_date>=? AND order_date<? GROUP BY month").bind(start, end).all()
+    conversions = {row["month"]: int(row["conversions"]) for row in _rows(conv_rows)}
+    if user["role"] == "manager":
+        return [{"month": month, "conversions": conversions.get(month, 0)} for month in months]
+    cash = _rows(await db.prepare("SELECT substr(paid_on,1,7) month,SUM(CASE WHEN payment_type='receipt' THEN amount_minor ELSE -amount_minor END) received FROM payments GROUP BY month").all())
+    expenses = _rows(await db.prepare("SELECT substr(spent_on,1,7) month,SUM(amount_minor) amount FROM expenses GROUP BY month").all())
+    received_by_month = {row["month"]: int(row["received"] or 0) for row in cash}
+    expense_by_month = {row["month"]: int(row["amount"] or 0) for row in expenses}
+    return [{"month": month, "received": _money(received_by_month.get(month, 0)), "expenses": _money(expense_by_month.get(month, 0))} for month in months]
+
+
+@app.get("/api/incentive/settings")
+async def incentive_settings(request: Request):
+    _, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    db = _env(request).DB
+    try:
+        pool = float(await _setting(db, "incentive_pool_rate", "5"))
+        rep = float(await _setting(db, "incentive_rep_rate", "2"))
+        manager = float(await _setting(db, "incentive_manager_rate", "3"))
+        days = int(await _setting(db, "incentive_payout_due_days", "30"))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "Incentive settings need owner review"}, status_code=409)
+    return {"pool_rate": pool, "rep_rate": rep, "manager_rate": manager, "payout_due_days": days}
+
+
+@app.post("/api/incentive/settings")
+async def update_incentive_settings(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        db = _env(request).DB
+        pool = Decimal(str(data.get("pool_rate", await _setting(db, "incentive_pool_rate", "5"))))
+        rep = Decimal(str(data.get("rep_rate", await _setting(db, "incentive_rep_rate", "2"))))
+        manager = Decimal(str(data.get("manager_rate", await _setting(db, "incentive_manager_rate", "3"))))
+        days = int(data.get("payout_due_days", await _setting(db, "incentive_payout_due_days", "30")))
+        if not all(x.is_finite() for x in (pool, rep, manager)) or min(pool, rep, manager) < 0 or pool > 100 or rep + manager > pool:
+            raise ValueError("Employee and manager shares must fit within the 0–100% incentive pool")
+        if days < 1 or days > 3650:
+            raise ValueError("Payout due days must be between 1 and 3,650")
+    except (ValueError, TypeError, InvalidOperation) as exc:
+        return JSONResponse({"error": str(exc) or "Check the incentive settings"}, status_code=400)
+    values = [("incentive_pool_rate", str(pool)), ("incentive_rep_rate", str(rep)),
+              ("incentive_manager_rate", str(manager)), ("incentive_payout_due_days", str(days))]
+    statements = [db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(k, v) for k, v in values]
+    statements.append(db.prepare("INSERT INTO audit_log(actor_id,action,entity) VALUES(?,'updated','incentive_rules')").bind(user["id"]))
+    try:
+        await db.batch(statements)
+    except Exception:
+        return JSONResponse({"error": "Incentive settings were not saved; retry the update"}, status_code=409)
+    return {"ok": True, "pool_rate": float(pool), "rep_rate": float(rep), "manager_rate": float(manager), "payout_due_days": days}
+
+
+@app.get("/api/incentive/team-rules")
+async def incentive_team_rules(request: Request):
+    user, error = await _require_user(request, ("manager",))
+    if error:
+        return error
+    db = _env(request).DB
+    defaults = await incentive_settings(request)
+    if isinstance(defaults, JSONResponse):
+        return defaults
+    rows = await db.prepare(
+        "SELECT u.id,u.name,r.rep_rate,r.manager_rate FROM users u LEFT JOIN manager_incentive_rules r "
+        "ON r.employee_id=u.id AND r.manager_id=? WHERE u.manager_id=? AND u.role='employee' AND u.is_active=1 ORDER BY u.name"
+    ).bind(user["id"], user["id"]).all()
+    return [{"employee_id": r["id"], "employee": r["name"],
+             "rep_rate": float(r["rep_rate"] if r["rep_rate"] is not None else defaults["rep_rate"]),
+             "manager_rate": float(r["manager_rate"] if r["manager_rate"] is not None else defaults["manager_rate"]),
+             "customized": r["rep_rate"] is not None} for r in _rows(rows)]
+
+
+@app.post("/api/incentive/team-rules")
 async def update_incentive_team_rule(request: Request):
     user, error = await _require_user(request, ("manager",))
     if error:
@@ -2259,6 +2547,74 @@ async def update_customer(request: Request):
     return {"ok": True}
 
 
+@app.post("/api/customers/delete")
+async def delete_customer(request: Request):
+    user, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        customer_id = int(data.get("customer_id", 0))
+        if data.get("confirmed") is not True:
+            raise ValueError("Confirm the student deletion")
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Choose a student to delete"}, status_code=400)
+    db = _env(request).DB
+    customer = await _first(db.prepare("SELECT id FROM customers WHERE id=?").bind(customer_id))
+    if not customer:
+        return JSONResponse({"error": "Student not found"}, status_code=404)
+    orders_for_customer = _rows(await db.prepare("SELECT id,employee_id FROM orders WHERE customer_id=? ORDER BY id").bind(customer_id).all())
+    order_ids = [int(row["id"]) for row in orders_for_customer]
+    if user["role"] == "manager":
+        allowed = _rows(await db.prepare("WITH RECURSIVE team(id) AS (SELECT id FROM users WHERE manager_id=? AND is_active=1 UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) SELECT id FROM team UNION SELECT ?").bind(user["id"], user["id"]).all())
+        allowed_ids = {int(row["id"]) for row in allowed}
+        if not orders_for_customer or any(row["employee_id"] is None or int(row["employee_id"]) not in allowed_ids for row in orders_for_customer):
+            return JSONResponse({"error": "This student has a conversion outside your reporting team. Ask the owner to delete the complete student record."}, status_code=403)
+    order_marks = ",".join("?" for _ in order_ids) or "NULL"
+    installment_ids = [int(row["id"]) for row in _rows(await db.prepare(f"SELECT id FROM installments WHERE order_id IN ({order_marks})").bind(*order_ids).all())] if order_ids else []
+    invoice_ids = [int(row["id"]) for row in _rows(await db.prepare(f"SELECT id FROM invoices WHERE order_id IN ({order_marks})").bind(*order_ids).all())] if order_ids else []
+    event_ids = [int(row["id"]) for row in _rows(await db.prepare(f"SELECT id FROM commission_events WHERE order_id IN ({order_marks})").bind(*order_ids).all())] if order_ids else []
+    if invoice_ids:
+        sending = await _first(db.prepare("SELECT id FROM email_outbox WHERE status='sending' AND (" + " OR ".join("dedupe_key LIKE ?" for _ in invoice_ids) + ") LIMIT 1").bind(*[f"invoice-send:{invoice_id}:%" for invoice_id in invoice_ids]))
+        if sending:
+            return JSONResponse({"error": "An invoice email is being delivered. Wait for its status before deleting this student."}, status_code=409)
+    if order_ids:
+        links = _rows(await db.prepare(f"SELECT link_id,status FROM razorpay_payment_links WHERE order_id IN ({order_marks})").bind(*order_ids).all())
+        if any(row["status"] in ("created", "partially_paid") for row in links):
+            return JSONResponse({"error": "This student has an open online payment link. Close or reconcile it in Razorpay before deleting the student."}, status_code=409)
+    statements = []
+    if installment_ids:
+        marks = ",".join("?" for _ in installment_ids)
+        statements.append(db.prepare(f"DELETE FROM email_outbox WHERE installment_id IN ({marks})").bind(*installment_ids))
+    for invoice_id in invoice_ids:
+        statements.append(db.prepare("DELETE FROM email_outbox WHERE dedupe_key LIKE ?").bind(f"invoice-send:{invoice_id}:%"))
+    if event_ids:
+        marks = ",".join("?" for _ in event_ids)
+        statements.extend([
+            db.prepare(f"DELETE FROM commission_payout_allocations WHERE commission_event_id IN ({marks})").bind(*event_ids),
+            db.prepare(f"DELETE FROM commission_events WHERE id IN ({marks})").bind(*event_ids),
+        ])
+    if invoice_ids:
+        marks = ",".join("?" for _ in invoice_ids)
+        statements.append(db.prepare(f"DELETE FROM invoices WHERE id IN ({marks})").bind(*invoice_ids))
+    if order_ids:
+        marks = ",".join("?" for _ in order_ids)
+        statements.extend([
+            db.prepare(f"DELETE FROM razorpay_payment_links WHERE order_id IN ({marks})").bind(*order_ids),
+            db.prepare(f"DELETE FROM payments WHERE order_id IN ({marks})").bind(*order_ids),
+            db.prepare(f"DELETE FROM orders WHERE id IN ({marks})").bind(*order_ids),
+        ])
+    statements.extend([
+        db.prepare("DELETE FROM customers WHERE id=?").bind(customer_id),
+        db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'deleted','customer',?)").bind(user["id"], customer_id),
+    ])
+    try:
+        await db.batch(statements)
+    except Exception:
+        return JSONResponse({"error": "Student and related records were not deleted; refresh and retry"}, status_code=409)
+    return {"ok": True, "student_deleted": True, "orders_deleted": len(order_ids), "invoices_deleted": len(invoice_ids)}
+
+
 @app.post("/api/targets/delete")
 async def delete_target(request: Request):
     user, error = await _require_user(request, ("owner", "manager"))
@@ -2440,6 +2796,81 @@ async def dashboard(request: Request):
             "incentive_pending": _money(max(0, int(totals["incentive_pending"] or 0))),
             "incentive_recovery": _money(max(0, -int(totals["incentive_pending"] or 0))),
             "incentive_paid": _money(totals["incentive_paid"]), "team": people}
+
+
+@app.get("/api/dashboard/overview")
+async def dashboard_overview(request: Request):
+    user, error = await _require_user(request, ("owner", "manager", "employee"))
+    if error:
+        return error
+    today = date.today()
+    try:
+        start = date.fromisoformat(str(request.query_params.get("from") or (today - timedelta(days=29)).isoformat()))
+        end = date.fromisoformat(str(request.query_params.get("to") or today.isoformat()))
+        if end < start or (end - start).days > 36600:
+            raise ValueError
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "Choose a valid date range of up to 100 years"}, status_code=400)
+    end_exclusive = (end + timedelta(days=1)).isoformat()
+    db = _env(request).DB
+    role, uid = user["role"], int(user["id"])
+    if role == "owner":
+        ids = None
+    elif role == "manager":
+        rows = await db.prepare("WITH RECURSIVE team(id) AS (SELECT id FROM users WHERE manager_id=? AND is_active=1 UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) SELECT id FROM team UNION SELECT ?").bind(uid, uid).all()
+        ids = [int(row["id"]) for row in _rows(rows)]
+    else:
+        ids = [uid]
+    clause, args = ("", []) if ids is None else (" AND o.employee_id IN (" + ",".join("?" for _ in ids) + ")", list(ids))
+    order_rows = _rows(await db.prepare("SELECT o.id,o.customer_id,o.total_minor,o.employee_id,o.order_no,o.order_date,o.enrollment_status,c.name student,COALESCE((SELECT SUM(CASE WHEN p.payment_type='receipt' THEN p.amount_minor ELSE -p.amount_minor END) FROM payments p WHERE p.order_id=o.id),0) received FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.status='active' AND o.order_date>=? AND o.order_date<?" + clause + " ORDER BY o.order_date DESC,o.id DESC").bind(start.isoformat(), end_exclusive, *args).all())
+    conversions, students = len(order_rows), len({row["customer_id"] for row in order_rows})
+    outstanding = sum(max(0, int(row["total_minor"] or 0) - int(row["received"] or 0)) for row in order_rows)
+    students_to_collect = len({row["customer_id"] for row in order_rows if int(row["total_minor"] or 0) > int(row["received"] or 0)})
+    cash_clause, cash_args = ("", []) if ids is None else (" AND o.employee_id IN (" + ",".join("?" for _ in ids) + ")", list(ids))
+    cash = await _first(db.prepare("SELECT COALESCE(SUM(CASE WHEN p.payment_type='receipt' THEN p.amount_minor ELSE -p.amount_minor END),0) amount FROM payments p JOIN orders o ON o.id=p.order_id WHERE p.paid_on>=? AND p.paid_on<?" + cash_clause).bind(start.isoformat(), end_exclusive, *cash_args))
+    commission_clause, commission_args = ("", []) if ids is None else (" AND e.employee_id IN (" + ",".join("?" for _ in ids) + ")", list(ids))
+    commission = await _first(db.prepare("SELECT COALESCE(SUM(e.amount_minor),0) earned,COALESCE(SUM(e.amount_minor-e.paid_minor),0) due FROM commission_events e JOIN payments p ON p.id=e.payment_id JOIN orders o ON o.id=e.order_id WHERE p.paid_on>=? AND p.paid_on<?" + commission_clause).bind(start.isoformat(), end_exclusive, *commission_args))
+    payout = await _first(db.prepare("SELECT COALESCE(SUM(amount_minor),0) amount FROM commission_payouts WHERE paid_on>=? AND paid_on<?" + (" AND employee_id IN (" + ",".join("?" for _ in ids) + ")" if ids is not None else "")).bind(start.isoformat(), end_exclusive, *(ids or [])))
+    result = {"role": role, "from": start.isoformat(), "to": end.isoformat(), "conversions": conversions, "students": students,
+              "students_to_collect": students_to_collect, "outstanding": _money(outstanding),
+              "incentive_earned": _money(commission["earned"]), "incentive_due": _money(max(0, int(commission["due"] or 0))),
+              "incentive_recovery": _money(max(0, -int(commission["due"] or 0))), "incentive_paid": _money(payout["amount"])}
+    if role == "owner":
+        sales = sum(int(row["total_minor"] or 0) for row in order_rows)
+        expenses = await _first(db.prepare("SELECT COALESCE(SUM(amount_minor),0) amount FROM expenses WHERE spent_on>=? AND spent_on<?").bind(start.isoformat(), end_exclusive))
+        monthly_trend = (end - start).days > 90
+        trend_expr = "substr(p.paid_on,1,7)" if monthly_trend else "p.paid_on"
+        trend = _rows(await db.prepare(f"SELECT {trend_expr} day,COALESCE(SUM(CASE WHEN p.payment_type='receipt' THEN p.amount_minor ELSE -p.amount_minor END),0) amount FROM payments p WHERE p.paid_on>=? AND p.paid_on<? GROUP BY day ORDER BY day").bind(start.isoformat(), end_exclusive).all())
+        for row in trend:
+            row["label"] = date.fromisoformat(row["day"] + "-01" if monthly_trend else row["day"]).strftime("%b %y" if monthly_trend else "%d %b")
+            row["amount"] = _money(row["amount"])
+        result.update({"sales": _money(sales), "received": _money(cash["amount"]), "expenses": _money(expenses["amount"]),
+                       "net_cash": _money(int(cash["amount"] or 0) - int(expenses["amount"] or 0)),
+                       "collection_rate": round(int(cash["amount"] or 0) / sales * 100, 1) if sales else 0,
+                       "trend": trend, "team": []})
+    elif role == "manager":
+        async def count_scope(scope_ids):
+            clause = "" if scope_ids is None else " AND o.employee_id IN (" + ",".join("?" for _ in scope_ids) + ")"
+            scope_args = [] if scope_ids is None else list(scope_ids)
+            rows = _rows(await db.prepare("SELECT o.id,o.customer_id,o.total_minor,COALESCE(SUM(CASE WHEN p.payment_type='receipt' THEN p.amount_minor ELSE -p.amount_minor END),0) received FROM orders o LEFT JOIN payments p ON p.order_id=o.id WHERE o.status='active' AND o.order_date>=? AND o.order_date<?" + clause + " GROUP BY o.id").bind(start.isoformat(), end_exclusive, *scope_args).all())
+            open_orders = [row for row in rows if int(row["total_minor"] or 0) > int(row["received"] or 0)]
+            return {"conversions": len(rows), "students": len({row["customer_id"] for row in rows}),
+                    "students_to_collect": len({row["customer_id"] for row in open_orders}),
+                    "outstanding": _money(sum(max(0, int(row["total_minor"] or 0)-int(row["received"] or 0)) for row in rows))}
+        mine = await count_scope([uid])
+        team_ids = [member for member in ids if member != uid]
+        result.update({"scopes": {"mine": mine, "team": await count_scope(team_ids), "company": await count_scope(None)},
+                       "team": [], "trend": []})
+    else:
+        own_orders = []
+        for row in order_rows:
+            products = _rows(await db.prepare("SELECT p.name,COALESCE(b.name,'') batch FROM order_items oi JOIN products p ON p.id=oi.product_id LEFT JOIN batches b ON b.id=oi.batch_id WHERE oi.order_id=? ORDER BY oi.id").bind(row["id"]).all())
+            own_orders.append({"order_no": row["order_no"], "date": row["order_date"], "student": row["student"],
+                               "products": products, "stage": row["enrollment_status"],
+                               "outstanding": _money(max(0, int(row["total_minor"] or 0)-int(row["received"] or 0)))})
+        result["my_orders"] = own_orders
+        result["trend"] = []
+    return result
 
 
 @app.get("/api/invoices")
