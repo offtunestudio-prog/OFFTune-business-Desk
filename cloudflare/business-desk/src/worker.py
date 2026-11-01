@@ -14,6 +14,8 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+from js import Object, Uint8Array, crypto
+from pyodide.ffi import to_js
 from workers import asgi
 
 
@@ -72,20 +74,31 @@ def _env(request: Request):
     return request.scope["env"]
 
 
-def _hash_password(password: str) -> str:
+async def _pbkdf2_sha256(password: str, salt: bytes, rounds: int) -> bytes:
+    key = await crypto.subtle.importKey(
+        "raw", to_js(password.encode()), "PBKDF2", False, to_js(["deriveBits"])
+    )
+    algorithm = to_js({
+        "name": "PBKDF2", "salt": to_js(salt), "iterations": rounds, "hash": "SHA-256"
+    }, dict_converter=Object.fromEntries)
+    derived = await crypto.subtle.deriveBits(algorithm, key, 256)
+    return Uint8Array.new(derived).to_py().tobytes()
+
+
+async def _hash_password(password: str) -> str:
     if len(password) < 12:
         raise ValueError("Use a password with at least 12 characters")
     salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PBKDF2_ROUNDS)
+    digest = await _pbkdf2_sha256(password, salt, PBKDF2_ROUNDS)
     return f"pbkdf2_sha256${PBKDF2_ROUNDS}${salt.hex()}${digest.hex()}"
 
 
-def _password_matches(password: str, stored: str) -> bool:
+async def _password_matches(password: str, stored: str) -> bool:
     try:
         scheme, rounds, salt_hex, expected = stored.split("$")
         if scheme != "pbkdf2_sha256":
             return False
-        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt_hex), int(rounds))
+        digest = await _pbkdf2_sha256(password, bytes.fromhex(salt_hex), int(rounds))
         return hmac.compare_digest(digest.hex(), expected)
     except (ValueError, TypeError):
         return False
@@ -1023,7 +1036,7 @@ async def create_team_member(request: Request):
         password = str(data.get("password", ""))
         if not name or "@" not in email or len(email) > 254:
             raise ValueError("Enter a valid name and work email")
-        encoded_password = _hash_password(password)
+        encoded_password = await _hash_password(password)
     except (ValueError, TypeError) as exc:
         return JSONResponse({"error": str(exc) or "Check the team member details"}, status_code=400)
     db = _env(request).DB
@@ -1202,7 +1215,7 @@ async def reset_team_password(request: Request):
     try:
         data = await request.json()
         user_id = int(data.get("user_id", 0))
-        password_hash = _hash_password(str(data.get("password", "")))
+        password_hash = await _hash_password(str(data.get("password", "")))
     except (ValueError, TypeError) as exc:
         return JSONResponse({"error": str(exc) or "Choose a valid team member and password"}, status_code=400)
     db = _env(request).DB
@@ -3170,7 +3183,7 @@ async def auth_setup(request: Request):
     if count["n"]:
         return JSONResponse({"error": "Workspace setup is already complete"}, status_code=409)
     try:
-        password = _hash_password(str(data.get("password", "")))
+        password = await _hash_password(str(data.get("password", "")))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     result = _plain(await db.prepare(
@@ -3192,7 +3205,7 @@ async def auth_login(request: Request):
     email = str(data.get("email", "")).strip().lower()
     db = _env(request).DB
     user = await _first(db.prepare("SELECT id,password_hash,is_active FROM users WHERE lower(email)=?").bind(email))
-    if not user or not user["is_active"] or not _password_matches(str(data.get("password", "")), user["password_hash"]):
+    if not user or not user["is_active"] or not await _password_matches(str(data.get("password", "")), user["password_hash"]):
         return JSONResponse({"error": "Email or password is incorrect"}, status_code=401)
     token, csrf = await _new_session(request, user["id"])
     response = JSONResponse({"ok": True, "csrf": csrf})
@@ -3251,7 +3264,7 @@ async def update_owner_profile(request: Request):
         if not name or len(name) > 120 or "@" not in email or len(email) > 254 or any(ch.isspace() for ch in email):
             raise ValueError("Enter a valid owner name and email")
         current = await _first(_env(request).DB.prepare("SELECT password_hash FROM users WHERE id=? AND role='owner'").bind(user["id"]))
-        if not current or not _password_matches(str(data.get("current_password", "")), str(current["password_hash"])):
+        if not current or not await _password_matches(str(data.get("current_password", "")), str(current["password_hash"])):
             return JSONResponse({"error": "Current password is incorrect"}, status_code=401)
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -3280,9 +3293,9 @@ async def reset_owner_password(request: Request):
         if len(password) < 12:
             raise ValueError("Use a password with at least 12 characters")
         owner = await _first(_env(request).DB.prepare("SELECT password_hash FROM users WHERE id=? AND role='owner'").bind(user["id"]))
-        if not owner or not _password_matches(str(data.get("current_password", "")), str(owner["password_hash"])):
+        if not owner or not await _password_matches(str(data.get("current_password", "")), str(owner["password_hash"])):
             return JSONResponse({"error": "Current password is incorrect"}, status_code=401)
-        new_hash = _hash_password(password)
+        new_hash = await _hash_password(password)
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     cookie = request.cookies.get("offtune_session")
@@ -3384,7 +3397,7 @@ async def reset_workspace_data(request: Request):
         return JSONResponse({"error": str(exc)}, status_code=400)
     db = _env(request).DB
     owner = await _first(db.prepare("SELECT password_hash FROM users WHERE id=? AND role='owner'").bind(user["id"]))
-    if not owner or not _password_matches(str(data.get("current_password", "")), str(owner["password_hash"])):
+    if not owner or not await _password_matches(str(data.get("current_password", "")), str(owner["password_hash"])):
         return JSONResponse({"error": "Current password is incorrect"}, status_code=401)
     open_link = await _first(db.prepare("SELECT id FROM razorpay_payment_links WHERE status IN ('created','partially_paid') LIMIT 1").bind())
     if open_link:
