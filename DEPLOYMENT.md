@@ -22,11 +22,12 @@ Keep the existing web interface, then move the data and server responsibilities 
 
 After the GitHub repository and hosting accounts are connected, the deployed app does not depend on a ChatGPT subscription or on which ChatGPT account is used. The app keeps running under the owner's GitHub, Cloudflare, and Supabase accounts. Another ChatGPT account can help edit it only if that person/account has access to the same repository. Provider API usage (for example Gemini, OpenRouter, email, or Razorpay) remains tied to the credentials configured for the deployed app, not to ChatGPT.
 
-## Current blockers before public deployment
+## Current status before public deployment
 
-- No Git repository or GitHub remote is configured in this folder yet.
+- The source is uploaded to `offtunestudio-prog/OFFTune-business-Desk`. The repository is public; local business data and credentials are excluded.
 - SQLite, local credential files, and the current Python HTTP server need a production architecture; the current code is not a Cloudflare Pages/Workers deployment.
 - Supabase currently contains only the empty workspace/auth foundation; business tables, sign-in integration, and data migration are still required. Its URL, public key, and server-side secrets must be configured without committing them.
+- The connected Cloudflare account currently has no Workers, Pages projects, or DNS zones, so there is no live app URL or GitHub auto-deploy connection yet.
 - The Cloudflare Gemini relay still has localhost origins in `wrangler.toml`; production origins must be exact HTTPS URLs before that relay is deployed.
 - No production subdomain was provided, so no Wix DNS record should be changed yet.
 - Reminder sending, account recovery, production backups, and payment webhooks need a hosted implementation and a test environment before real customer data is used.
