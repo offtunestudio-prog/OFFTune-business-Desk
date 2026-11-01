@@ -1,5 +1,5 @@
-Warning: truncated output (original token count: 52449)
-Total output lines: 3198
+Warning: truncated output (original token count: 52963)
+Total output lines: 3230
 
 """Cloudflare Worker entry point for OFFTune Business Desk."""
 
@@ -424,6 +424,9 @@ async def orders(request: Request):
     if user["role"] == "manager":
         scope = " AND o.employee_id IN (WITH RECURSIVE team(id) AS (SELECT id FROM users WHERE manager_id=? AND is_active=1 UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) SELECT id FROM team UNION SELECT ?)"
         binds = [user["id"], user["id"]]
+    elif user["role"] == "employee":
+        scope = " AND o.employee_id=?"
+        binds = [user["id"]]
     rows = await db.prepare(
         "SELECT o.*,c.name customer_name,c.phone,c.email,u.name employee_name FROM orders o "
         "JOIN customers c ON c.id=o.customer_id LEFT JOIN users u ON u.id=o.employee_id "
@@ -1635,42 +1638,7 @@ async def update_reminder_settings(request: Request):
         statements.append(db.prepare("INSERT INTO settings(key,value) VALUES('emi_reminder_stages',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(plan_json))
     if types_json is not None:
         statements.append(db.prepare("INSERT INTO settings(key,value) VALUES('emi_reminder_types',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(types_json))
-    statements.append(db.prepare("INSERT INTO audit_log(actor_id,action,entity) VALUES(?,'updated','reminder_email_rules')").bind(user["id"]))
-    try:
-        aw…2449 tokens truncated…nd 3,650")
-    except (ValueError, TypeError, InvalidOperation) as exc:
-        return JSONResponse({"error": str(exc) or "Check the incentive settings"}, status_code=400)
-    values = [("incentive_pool_rate", str(pool)), ("incentive_rep_rate", str(rep)),
-              ("incentive_manager_rate", str(manager)), ("incentive_payout_due_days", str(days))]
-    statements = [db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(k, v) for k, v in values]
-    statements.append(db.prepare("INSERT INTO audit_log(actor_id,action,entity) VALUES(?,'updated','incentive_rules')").bind(user["id"]))
-    try:
-        await db.batch(statements)
-    except Exception:
-        return JSONResponse({"error": "Incentive settings were not saved; retry the update"}, status_code=409)
-    return {"ok": True, "pool_rate": float(pool), "rep_rate": float(rep), "manager_rate": float(manager), "payout_due_days": days}
-
-
-@app.get("/api/incentive/team-rules")
-async def incentive_team_rules(request: Request):
-    user, error = await _require_user(request, ("manager",))
-    if error:
-        return error
-    db = _env(request).DB
-    defaults = await incentive_settings(request)
-    if isinstance(defaults, JSONResponse):
-        return defaults
-    rows = await db.prepare(
-        "SELECT u.id,u.name,r.rep_rate,r.manager_rate FROM users u LEFT JOIN manager_incentive_rules r "
-        "ON r.employee_id=u.id AND r.manager_id=? WHERE u.manager_id=? AND u.role='employee' AND u.is_active=1 ORDER BY u.name"
-    ).bind(user["id"], user["id"]).all()
-    return [{"employee_id": r["id"], "employee": r["name"],
-             "rep_rate": float(r["rep_rate"] if r["rep_rate"] is not None else defaults["rep_rate"]),
-             "manager_rate": float(r["manager_rate"] if r["manager_rate"] is not None else defaults["manager_rate"]),
-             "customized": r["rep_rate"] is not None} for r in _rows(rows)]
-
-
-@app.post("/api/incentive/team-rules")
+    statements.append(db.prepare("INSERT INTO audit_log(a…2963 tokens truncated…post("/api/incentive/team-rules")
 async def update_incentive_team_rule(request: Request):
     user, error = await _require_user(request, ("manager",))
     if error:
@@ -2227,6 +2195,35 @@ async def update_order_batches(request: Request):
     except Exception:
         return JSONResponse({"error": "The batch assignment was not saved; refresh and retry"}, status_code=409)
     return {"ok": True, "changed": changed}
+
+
+@app.get("/api/customers/{customer_id}")
+async def customer_profile(customer_id: int, request: Request):
+    user, error = await _require_user(request, ("owner", "manager", "employee"))
+    if error:
+        return error
+    db = _env(request).DB
+    customer = await _first(db.prepare("SELECT id,name,phone,email,created_at FROM customers WHERE id=?").bind(customer_id))
+    if not customer:
+        return JSONResponse({"error": "Student not found"}, status_code=404)
+    visible_orders = [row for row in await orders(request) if int(row["customer_id"]) == customer_id]
+    if not visible_orders:
+        return JSONResponse({"error": "Student not found in your workspace"}, status_code=404)
+    order_ids = {int(row["id"]) for row in visible_orders}
+    order_numbers = {row["order_no"] for row in visible_orders}
+    visible_installments = [row for row in await installments(request) if row["order_no"] in order_numbers]
+    visible_payments = [row for row in await payments(request) if int(row["order_id"]) in order_ids]
+    if user["role"] == "employee":
+        batch_rows = await db.prepare(
+            "SELECT DISTINCT b.id,b.name,b.product_id,b.status FROM batches b JOIN order_items oi ON oi.batch_id=b.id "
+            "JOIN orders o ON o.id=oi.order_id WHERE o.employee_id=? AND o.customer_id=? ORDER BY b.name"
+        ).bind(user["id"], customer_id).all()
+    else:
+        batch_rows = await db.prepare("SELECT id,name,product_id,status FROM batches ORDER BY name").all()
+    return {"student": {"id": customer["id"], "name": customer["name"], "phone": customer["phone"] or "",
+                         "email": customer["email"] or "", "created_at": customer["created_at"]},
+            "orders": visible_orders, "installments": visible_installments, "payments": visible_payments,
+            "batches": [{"id": row["id"], "name": row["name"], "product_id": row["product_id"], "status": row["status"]} for row in _rows(batch_rows)]}
 
 
 @app.post("/api/customers/update")
