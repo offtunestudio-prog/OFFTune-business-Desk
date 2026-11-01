@@ -121,10 +121,13 @@ async function enterApp() {
   renderAccountAvatar();
   $("#role-label").textContent = `${state.user.designation||state.user.job_title||titleCase(state.user.role)} workspace`;
   const preview=$("#workspace-preview-banner"); if(preview){preview.classList.toggle("hidden",!state.workspacePreview);preview.innerHTML=state.workspacePreview?`<span><strong>Previewing ${esc(state.user.name)}’s ${esc(state.user.job_title||titleCase(state.user.role))} workspace</strong><small>Signed in as ${esc(state.workspaceOwnerName)} · Changes here use this team member’s access.</small></span><button type="button" class="button small secondary" id="return-owner-workspace">Return to owner workspace</button>`:"";$("#return-owner-workspace")?.addEventListener("click",async()=>{try{await post("/api/team/preview/end",{});location.reload();}catch(e){toast(e.message,true);}});}
-  if (state.user.role === "owner") state.settings = await api("/api/settings").catch(() => ({}));
+  const common = loadCommon();
+  const settings = state.user.role === "owner" ? api("/api/settings").catch(() => ({})) : Promise.resolve(state.settings);
+  const incentiveRules = ["owner","manager"].includes(state.user.role) ? api("/api/incentive/settings").catch(() => state.incentiveRules) : Promise.resolve(state.incentiveRules);
+  [state.settings, state.incentiveRules] = await Promise.all([settings, incentiveRules]);
   applyBrandLogo(state.settings.invoice_logo_data||"");
-  if (["owner","manager"].includes(state.user.role)) state.incentiveRules = await api("/api/incentive/settings").catch(() => state.incentiveRules);
-  await loadCommon(); renderNav(); await navigate("overview"); startMessagePolling();
+  await common; renderNav(); await navigate("overview"); startMessagePolling();
+  api("/api/team/messages").then(messages=>{state.teamMessages=messages;updateNotificationUI();}).catch(()=>{});
 }
 function updateNotificationUI(){
   const button=$("#notification-bell"),badge=$("#notification-count");
@@ -180,16 +183,12 @@ function applyBrandLogo(dataUrl="") {
   $$('[data-q-brand]').forEach(img=>{if(img.getAttribute("src")!==source)img.src=source;});
 }
 async function loadCommon() {
-  if (state.user.role === "employee") {
-    state.products = await api("/api/products").catch(()=>[]);
-    [state.batches,state.orders] = await Promise.all([api("/api/batches").catch(()=>[]),api("/api/orders").catch(()=>[])]);
-  }
-  else {
-    state.products = await api("/api/products").catch(() => []);
-    state.batches = await api("/api/batches").catch(() => []);
-    state.orders = await api("/api/orders").catch(() => []);
-  }
-  state.team = ["owner", "manager"].includes(state.user.role) ? await api("/api/team").catch(() => []) : [];
+  [state.products,state.batches,state.orders,state.team] = await Promise.all([
+    api("/api/products").catch(()=>[]),
+    api("/api/batches").catch(()=>[]),
+    api("/api/orders").catch(()=>[]),
+    ["owner", "manager"].includes(state.user.role) ? api("/api/team").catch(()=>[]) : Promise.resolve([])
+  ]);
 }
 function navItems() {
   const employee=state.user.role==="employee";const items=[{id:"overview",label:"Overview",icon:"▦"},{id:employee?"my-goals":"targets",label:employee?"My goals":state.user.role==="manager"?"Team targets":"Targets",icon:"◎"},{id:"collections",label:"Finance Desk",icon:"↘"},{id:"followup",label:"Follow-up",icon:"◷"},{id:"products",label:"Products",icon:"◇"},{id:"incentives",label:employee?"My incentives":"Incentives",icon:"✦"},{id:"invoices",label:"Invoices",icon:"▤"},{id:"team",label:state.user.role==="owner"?"Team & access":"My team",icon:"♧"},{id:"reports",label:"Reports",icon:"▥"},{id:"batches",label:"Batches",icon:"▦"},{id:"analytics",label:"Course analytics",icon:"◉"},{id:"messages",label:"Messages",icon:"✉"},{id:"expenses",label:"Expenses",icon:"↗"},{id:"my-students",label:"My students",icon:"♧"}];
@@ -212,28 +211,24 @@ async function navigate(page) {
   $("#page-title").textContent = meta.label;
   $("#content").innerHTML = `<div class="loading"><span></span>Loading your workspace</div>`;
   try {
-    const d = await api("/api/dashboard");
-    if (!state.user || d.role !== state.user.role) {
+    const needsDashboard = page === "overview" || page === "team";
+    const range = page === "overview" ? overviewRange(state.overviewPreset) : null;
+    const [freshDashboard, overview, targetCourses, messages] = await Promise.all([
+      needsDashboard ? api("/api/dashboard") : Promise.resolve(null),
+      range ? loadOverviewData(range.from,range.to) : Promise.resolve(null),
+      range && state.user.role === "employee" ? api("/api/targets/self?month="+encodeURIComponent(today().slice(0,7))).catch(()=>({courses:[]})) : Promise.resolve(null),
+      page === "messages" ? api("/api/team/messages") : Promise.resolve(null)
+    ]);
+    const d = freshDashboard || state.data.dashboard || {role:state.user.role};
+    if (freshDashboard && (!state.user || d.role !== state.user.role)) {
       throw new Error("Workspace data is out of sync with the signed-in account. Refresh the page to reload your workspace.");
     }
-    state.data.dashboard = d;
-    state.teamMessages=await api("/api/team/messages").catch(()=>[]);
-    updateNotificationUI();
+    if (freshDashboard) state.data.dashboard = d;
+    if (messages) { state.teamMessages=messages; updateNotificationUI(); }
     if (["overview"].includes(page)) {
-      if (state.user.role === "owner") {
-        const range=overviewRange(state.overviewPreset);
-        state.overviewFrom=range.from; state.overviewTo=range.to;
-        d.overview=await loadOverviewData(range.from,range.to);
-      } else if (state.user.role === "manager") {
-        const range=overviewRange(state.overviewPreset);
-        state.overviewFrom=range.from; state.overviewTo=range.to;
-        d.overview=await loadOverviewData(range.from,range.to);
-      } else {
-        const range=overviewRange(state.overviewPreset);
-        state.overviewFrom=range.from; state.overviewTo=range.to;
-        d.overview=await loadOverviewData(range.from,range.to);
-        d.targetCourses=await api("/api/targets/self?month="+encodeURIComponent(today().slice(0,7))).catch(()=>({courses:[]}));
-      }
+      state.overviewFrom=range.from; state.overviewTo=range.to;
+      d.overview=overview;
+      if (targetCourses) d.targetCourses=targetCourses;
       renderDashboard(d);
     }
     else if (page === "my-goals") { d.targetCourses=await api("/api/targets/self?month="+encodeURIComponent((state.targetsMonth||today().slice(0,7)))); renderEmployeeGoals(d); }
