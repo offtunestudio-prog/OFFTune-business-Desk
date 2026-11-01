@@ -1,0 +1,16 @@
+name = "offtune-gemini-live"
+main = "gemini-live-worker.js"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+[[durable_objects.bindings]]
+name = "TICKET_GUARD"
+class_name = "TicketGuard"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TicketGuard"]
+
+[vars]
+# Replace these with the exact HTTPS origin(s) that host the app before use.
+APP_ORIGINS = "http://127.0.0.1:8033,http://127.0.0.1:8034"

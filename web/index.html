@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#e51b2b">
+  <title>OFFTune Business Desk</title>
+  <link rel="icon" type="image/png" href="/q-logo.png?v=20261031-qbrand-v1">
+  <link rel="stylesheet" href="/styles.css?v=20261101-dex-ai-v1">
+<script src="/app.js?v=20261101-dex-ai-v1" defer></script>
+</head>
+<body>
+  <canvas id="ambient-particle-field" aria-hidden="true"></canvas>
+  <div id="auth-screen" class="auth-wrap hidden">
+    <div class="auth-card">
+      <div class="brand-mark"><img data-q-brand src="/q-logo.png?v=20261031-qbrand-v1" alt="OFFTune logo"></div>
+      <p class="eyebrow">OFFTUNE BUSINESS DESK</p>
+      <h1 id="auth-title">Welcome back</h1>
+      <p id="auth-description" class="muted">Sign in to your private workspace.</p>
+      <form id="auth-form" class="stack-form">
+        <label id="auth-name-wrap" class="hidden">Your name<input name="name" autocomplete="name"></label>
+        <label>Email<input name="email" type="email" autocomplete="username" required></label>
+        <label>Password<input name="password" type="password" autocomplete="current-password" minlength="12" required></label>
+        <button class="button primary full" type="submit" id="auth-submit">Sign in</button>
+      </form>
+      <p class="auth-foot">Private workspace · Access is limited by role</p>
+    </div>
+  </div>
+
+  <div id="app-shell" class="shell hidden">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark small"><img data-q-brand src="/q-logo.png?v=20261031-qbrand-v1" alt="OFFTune logo"></div><div><strong>OFFTune</strong><span>Business Desk</span></div></div>
+      <div class="workspace-label">WORKSPACE</div>
+      <nav id="nav" aria-label="Main navigation"></nav>
+      <div class="sidebar-bottom">
+        <div class="secure-pill"><span class="secure-dot"></span><span>Private team workspace</span></div>
+        <button id="signout" class="nav-link signout"><span class="nav-icon">↗</span><span>Sign out</span></button>
+      </div>
+    </aside>
+    <main class="main-area">
+      <section id="workspace-preview-banner" class="workspace-preview-banner hidden" aria-live="polite"></section>
+      <header class="topbar">
+        <div><p class="eyebrow" id="role-label">FINANCE OVERVIEW</p><h1 id="page-title">Overview</h1></div>
+        <div class="top-actions"><span class="date-chip" id="today-label"></span><button class="notification-bell" id="notification-bell" type="button" data-action="open-messages" aria-label="Open messages and reminders" title="Messages and reminders"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg><b id="notification-count" class="notification-count hidden" aria-live="polite"></b></button><button class="ai-launch-button" type="button" data-action="open-ai-assistant" aria-label="Open OFFTune Dex AI"><img src="/q-logo.png?v=20261031-qbrand-v1" alt=""><span>OFFTune Dex AI</span></button><button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to dark mode" title="Switch to dark mode"><span aria-hidden="true">☾</span></button><button class="avatar" id="avatar" aria-label="Current user">A</button></div>
+      </header>
+      <section id="content" class="content"></section>
+    </main>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
