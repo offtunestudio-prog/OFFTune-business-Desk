@@ -1,5 +1,5 @@
-Warning: truncated output (original token count: 41474)
-Total output lines: 2504
+Warning: truncated output (original token count: 42409)
+Total output lines: 2566
 
 """Cloudflare Worker entry point for OFFTune Business Desk."""
 
@@ -1008,7 +1008,7 @@ async def update_team_reporting(request: Request):
     if manager_id:
         manager = await _first(db.prepare("SELECT id FROM users WHERE id=? AND role='manager' AND is_active=1").bind(manager_id))
         if not manager:
-            return JSONResponse({"error": "Choose an active manager"}, s…11474 tokens truncated…    course_weeks.append({"week_start": cursor.isoformat(), "week_end": (week_end - timedelta(days=1)).isoformat(), "base_target": base, "carry_in": course_carry, "target": goal_week, "completed": completed_week, "remaining": remaining_week, "status": status_week})
+            return JSONResponse({"error": "Choose an active manager"}, s…12409 tokens truncated…    course_weeks.append({"week_start": cursor.isoformat(), "week_end": (week_end - timedelta(days=1)).isoformat(), "base_target": base, "carry_in": course_carry, "target": goal_week, "completed": completed_week, "remaining": remaining_week, "status": status_week})
             if week_end <= today:
                 course_carry = remaining_week
             cursor = week_end
