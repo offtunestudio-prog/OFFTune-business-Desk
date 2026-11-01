@@ -17,6 +17,34 @@ from workers import asgi
 app = FastAPI()
 SESSION_TTL = 60 * 60 * 12
 PBKDF2_ROUNDS = 310_000
+ACCESS_FEATURES = {
+    "overview": "Overview", "targets": "Targets", "collections": "Finance Desk & collections",
+    "followup": "Follow-up", "products": "Products & courses", "incentives": "Incentives",
+    "invoices": "Invoices & payment details", "team": "Team directory", "reports": "Reports",
+    "batches": "Batches", "analytics": "Course analytics", "messages": "Messages & reminders",
+    "expenses": "Expense records", "my-students": "My students",
+}
+DATA_ACCESS_OPTIONS = {
+    "company-revenue": "Company-wide revenue and cash totals", "sales-values": "Course prices and order values",
+    "payment-amounts": "Receipt, refund and installment amounts", "outstanding-balances": "Outstanding balances and amount due",
+    "commission-percentages": "Commission rates and split percentages", "own-incentives": "Own incentive earned, due and paid",
+    "team-incentives": "Team incentive totals and member breakdown", "student-contacts": "Student phone numbers and email addresses",
+    "invoice-values": "Invoice prices, received amounts and balances", "target-estimates": "Estimated income and incentive on targets",
+}
+DATA_ACCESS_GROUPS = {
+    "company-revenue": "Financial visibility", "sales-values": "Financial visibility", "payment-amounts": "Financial visibility",
+    "outstanding-balances": "Financial visibility", "invoice-values": "Financial visibility",
+    "commission-percentages": "Incentives", "own-incentives": "Incentives", "team-incentives": "Incentives",
+    "target-estimates": "Incentives", "student-contacts": "Student information",
+}
+DEFAULT_ROLE_ACCESS = {
+    "manager": ["overview", "targets", "collections", "followup", "products", "incentives", "invoices", "team", "reports", "batches", "analytics", "messages", "expenses"],
+    "employee": ["overview", "targets", "followup", "products", "invoices", "batches", "analytics", "messages", "incentives", "my-students", "expenses"],
+}
+DEFAULT_ROLE_DATA_ACCESS = {
+    "manager": ["payment-amounts", "outstanding-balances", "commission-percentages", "own-incentives", "team-incentives", "student-contacts", "invoice-values"],
+    "employee": ["sales-values", "payment-amounts", "outstanding-balances", "own-incentives", "student-contacts", "invoice-values"],
+}
 
 
 def _env(request: Request):
@@ -69,6 +97,10 @@ def _minor(value):
         return int((amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     except (InvalidOperation, ValueError, TypeError):
         raise ValueError("Enter a valid non-negative amount")
+
+
+def _boolean(value):
+    return value is True or str(value or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _json_list(value):
@@ -165,12 +197,16 @@ async def auth_session(request: Request):
     if not session:
         return {"setup_required": count["n"] == 0, "user": None, "csrf": None,
                 "workspace_preview": False, "owner_name": None}
+    default_permissions = list(ACCESS_FEATURES) if session["role"] == "owner" else DEFAULT_ROLE_ACCESS.get(session["role"], [])
+    default_data_permissions = list(DATA_ACCESS_OPTIONS) if session["role"] == "owner" else DEFAULT_ROLE_DATA_ACCESS.get(session["role"], [])
+    permissions = _json_list(session["permissions_json"]) if session["designation_id"] else default_permissions
+    data_permissions = _json_list(session["data_permissions_json"]) if session["designation_id"] else default_data_permissions
     return {"setup_required": False, "user": {"id": session["id"], "name": session["name"],
             "email": session["email"], "role": session["role"], "manager_id": session["manager_id"],
             "job_title": session["job_title"] or "", "designation_id": session["designation_id"],
             "designation": session["job_title"] or session["designation"] or session["role"].title(),
-            "permissions": _json_list(session["permissions_json"]),
-            "data_permissions": _json_list(session["data_permissions_json"]),
+            "permissions": permissions,
+            "data_permissions": data_permissions,
             "avatar_data": session["avatar_data"] or ""}, "csrf": session["csrf"],
             "workspace_preview": False, "owner_name": None}
 
@@ -192,6 +228,67 @@ async def products(request: Request):
             for r in _rows(rows)]
 
 
+@app.post("/api/products")
+async def create_product(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        sku = str(data.get("sku", "")).strip().upper()[:40]
+        name = str(data.get("name", "")).strip()[:160]
+        kind = str(data.get("product_type", ""))
+        price = _minor(data.get("price"))
+        rate = Decimal(str(data.get("commission_rate", 5)))
+        if not sku or not name or kind not in ("course", "sample_pack", "digital_product"):
+            raise ValueError("Enter SKU, product name and a valid product type")
+        if not rate.is_finite() or rate < 0 or rate > 100:
+            raise ValueError("Commission rate must be between 0 and 100")
+    except (ValueError, TypeError, InvalidOperation) as exc:
+        return JSONResponse({"error": str(exc) or "Check the product details"}, status_code=400)
+    db = _env(request).DB
+    try:
+        created = await _first(db.prepare(
+            "INSERT INTO products(sku,name,product_type,price_minor,currency,installment_allowed,commission_rate,active) "
+            "VALUES(?,?,?,?,?,?,?,?) RETURNING id"
+        ).bind(sku, name, kind, price, str(data.get("currency") or "INR")[:3], int(_boolean(data.get("installment_allowed"))), float(rate), int(price > 0)))
+        await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'created','product',?)").bind(user["id"], created["id"]).run()
+    except Exception:
+        return JSONResponse({"error": "Product was not saved. Check that its SKU is unique and try again."}, status_code=409)
+    return JSONResponse({"id": created["id"]}, status_code=201)
+
+
+@app.post("/api/products/update")
+async def update_product(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        product_id = int(data.get("id", 0))
+        name = str(data.get("name", "")).strip()[:160]
+        sku = str(data.get("sku", "")).strip().upper()[:40]
+        price = _minor(data.get("price"))
+        rate = Decimal(str(data.get("commission_rate", 5)))
+        if product_id < 1 or not name or not sku:
+            raise ValueError("Enter a product name and SKU")
+        if not rate.is_finite() or rate < 0 or rate > 100:
+            raise ValueError("Commission rate must be between 0 and 100")
+    except (ValueError, TypeError, InvalidOperation) as exc:
+        return JSONResponse({"error": str(exc) or "Check the product details"}, status_code=400)
+    db = _env(request).DB
+    product = await _first(db.prepare("SELECT id FROM products WHERE id=?").bind(product_id))
+    if not product:
+        return JSONResponse({"error": "Product not found"}, status_code=404)
+    try:
+        await db.prepare("UPDATE products SET name=?,sku=?,price_minor=?,commission_rate=?,installment_allowed=?,active=? WHERE id=?").bind(
+            name, sku, price, float(rate), int(_boolean(data.get("installment_allowed"))), int(price > 0 and _boolean(data.get("active"))), product_id).run()
+        await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'updated','product',?)").bind(user["id"], product_id).run()
+    except Exception:
+        return JSONResponse({"error": "Product was not updated. Check that its SKU is unique and try again."}, status_code=409)
+    return {"ok": True}
+
+
 @app.get("/api/batches")
 async def batches(request: Request):
     _, error = await _require_user(request, ("owner", "manager", "employee"))
@@ -203,6 +300,74 @@ async def batches(request: Request):
         "ORDER BY COALESCE(b.start_date,'9999-12-31') DESC,b.name"
     ).all()
     return _rows(rows)
+
+
+@app.post("/api/batches")
+async def save_batch(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        batch_id = int(data.get("id") or 0)
+        name = str(data.get("name", "")).strip()[:120]
+        product_id = int(data.get("product_id", 0))
+        start = date.fromisoformat(str(data["start_date"])) if data.get("start_date") else None
+        end = date.fromisoformat(str(data["end_date"])) if data.get("end_date") else None
+        if not name:
+            raise ValueError("Enter a batch name")
+        if start and end and end < start:
+            raise ValueError("Batch end date cannot be before start date")
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Check the batch details"}, status_code=400)
+    db = _env(request).DB
+    product = await _first(db.prepare("SELECT id,product_type,active FROM products WHERE id=?").bind(product_id))
+    if not product or product["product_type"] != "course":
+        return JSONResponse({"error": "Choose an active course for this batch"}, status_code=400)
+    status = "active" if product["active"] and _boolean(data.get("active")) else "setup_needed"
+    try:
+        if batch_id:
+            existing = await _first(db.prepare("SELECT id FROM batches WHERE id=?").bind(batch_id))
+            if not existing:
+                return JSONResponse({"error": "Batch not found"}, status_code=404)
+            await db.prepare("UPDATE batches SET name=?,product_id=?,start_date=?,end_date=?,status=? WHERE id=?").bind(
+                name, product_id, start.isoformat() if start else None, end.isoformat() if end else None, status, batch_id).run()
+            await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'updated','batch',?)").bind(user["id"], batch_id).run()
+            return {"ok": True, "id": batch_id}
+        created = await _first(db.prepare(
+            "INSERT INTO batches(name,product_id,start_date,end_date,status) VALUES(?,?,?,?,?) RETURNING id"
+        ).bind(name, product_id, start.isoformat() if start else None, end.isoformat() if end else None, status))
+        await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'created','batch',?)").bind(user["id"], created["id"]).run()
+        return JSONResponse({"id": created["id"]}, status_code=201)
+    except Exception:
+        return JSONResponse({"error": "Batch was not saved. Check the course and try again."}, status_code=409)
+
+
+@app.post("/api/batches/remove")
+async def remove_batch(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        batch_id = int(data.get("id", 0))
+        if data.get("confirmed") is not True:
+            raise ValueError("Confirm the batch removal")
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Choose a batch"}, status_code=400)
+    db = _env(request).DB
+    batch = await _first(db.prepare("SELECT id FROM batches WHERE id=?").bind(batch_id))
+    if not batch:
+        return JSONResponse({"error": "Batch not found"}, status_code=404)
+    links = await _first(db.prepare("SELECT COUNT(*) count FROM order_items WHERE batch_id=?").bind(batch_id))
+    archived = int(links["count"] or 0) > 0
+    if archived:
+        await db.prepare("UPDATE batches SET status='archived' WHERE id=?").bind(batch_id).run()
+    else:
+        await db.prepare("DELETE FROM batches WHERE id=?").bind(batch_id).run()
+    await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,?, 'batch',?)").bind(
+        user["id"], "archived" if archived else "deleted", batch_id).run()
+    return {"ok": True, "archived": archived}
 
 
 @app.get("/api/orders")
@@ -671,6 +836,212 @@ async def team(request: Request):
     return result
 
 
+@app.post("/api/team")
+async def create_team_member(request: Request):
+    user, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        name = str(data.get("name", "")).strip()[:120]
+        email = str(data.get("email", "")).strip().lower()
+        password = str(data.get("password", ""))
+        if not name or "@" not in email or len(email) > 254:
+            raise ValueError("Enter a valid name and work email")
+        encoded_password = _hash_password(password)
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Check the team member details"}, status_code=400)
+    db = _env(request).DB
+    designation_id = None
+    manager_id = None
+    if user["role"] == "manager":
+        role = "employee"
+        manager_id = user["id"]
+        if data.get("role") not in (None, "", "employee"):
+            return JSONResponse({"error": "Managers can add employee accounts only"}, status_code=403)
+        if data.get("manager_id") not in (None, "", str(user["id"]), user["id"]):
+            return JSONResponse({"error": "Employees added here must report directly to you"}, status_code=403)
+    else:
+        designation_id = int(data.get("designation_id") or 0) or None
+        designation = await _first(db.prepare("SELECT id,name,role_class FROM designations WHERE id=?").bind(designation_id)) if designation_id else None
+        role = designation["role_class"] if designation else str(data.get("role", "employee"))
+        if designation_id and not designation:
+            return JSONResponse({"error": "Choose a valid designation"}, status_code=400)
+        if role not in ("manager", "employee"):
+            return JSONResponse({"error": "Choose a valid designation"}, status_code=400)
+        try:
+            manager_id = int(data["manager_id"]) if data.get("manager_id") else None
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "Choose a valid reporting manager"}, status_code=400)
+        if manager_id:
+            manager = await _first(db.prepare("SELECT id FROM users WHERE id=? AND role='manager' AND is_active=1").bind(manager_id))
+            if not manager:
+                return JSONResponse({"error": "Choose an active manager"}, status_code=400)
+    job_title = str(data.get("job_title") or (designation["name"] if user["role"] == "owner" and designation else "Sales Executive" if role == "employee" else "Manager")).strip()[:80]
+    try:
+        created = await _first(db.prepare(
+            "INSERT INTO users(name,email,password_hash,role,job_title,designation_id,manager_id) "
+            "VALUES(?,?,?,?,?,?,?) RETURNING id"
+        ).bind(name, email, encoded_password, role, job_title, designation_id, manager_id))
+        await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'created','user',?)").bind(user["id"], created["id"]).run()
+    except Exception:
+        return JSONResponse({"error": "Team member was not added. Check that the email is not already in use."}, status_code=409)
+    return JSONResponse({"id": created["id"]}, status_code=201)
+
+
+@app.post("/api/team/profile")
+async def update_team_profile(request: Request):
+    user, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        user_id = int(data.get("user_id", 0))
+        name = str(data.get("name", "")).strip()[:120]
+        email = str(data.get("email", "")).strip().lower()
+        designation_id = int(data.get("designation_id") or 0) or None
+        requested_role = str(data.get("role", ""))
+        if not name or "@" not in email or len(email) > 254:
+            raise ValueError("Enter a valid name and work email")
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Check the team member details"}, status_code=400)
+    db = _env(request).DB
+    person = await _first(db.prepare("SELECT id,role,designation_id,job_title,manager_id FROM users WHERE id=? AND role IN ('manager','employee')").bind(user_id))
+    if not person:
+        return JSONResponse({"error": "Team member not found"}, status_code=404)
+    if user["role"] == "manager" and (person["role"] != "employee" or person["manager_id"] != user["id"]):
+        return JSONResponse({"error": "You can edit only your direct employees"}, status_code=403)
+    designation = await _first(db.prepare("SELECT id,name,role_class FROM designations WHERE id=?").bind(designation_id)) if designation_id else None
+    if designation_id and not designation:
+        return JSONResponse({"error": "Choose a valid designation"}, status_code=400)
+    role = designation["role_class"] if designation else requested_role or person["role"]
+    if role not in ("manager", "employee"):
+        return JSONResponse({"error": "Choose a valid designation"}, status_code=400)
+    if user["role"] != "owner" and (role != person["role"] or (designation_id and designation_id != person["designation_id"])):
+        return JSONResponse({"error": "Only the owner can change designation or access"}, status_code=403)
+    title_value = data.get("job_title") if "job_title" in data else (designation["name"] if designation else person["job_title"])
+    job_title = str(title_value or "").strip()[:80]
+    if user["role"] == "manager":
+        role = "employee"
+        manager_id = user["id"]
+    else:
+        try:
+            manager_id = int(data["manager_id"]) if data.get("manager_id") else None
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "Choose a valid reporting manager"}, status_code=400)
+    if manager_id == user_id:
+        return JSONResponse({"error": "A team member cannot report to themselves"}, status_code=400)
+    if manager_id:
+        manager = await _first(db.prepare("SELECT id FROM users WHERE id=? AND role='manager' AND is_active=1").bind(manager_id))
+        if not manager:
+            return JSONResponse({"error": "Choose an active manager"}, status_code=400)
+        descendant = await _first(db.prepare(
+            "WITH RECURSIVE team(id) AS (SELECT id FROM users WHERE manager_id=? "
+            "UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id) "
+            "SELECT EXISTS(SELECT 1 FROM team WHERE id=?) member"
+        ).bind(user_id, manager_id))
+        if descendant["member"]:
+            return JSONResponse({"error": "That reporting change would create a loop"}, status_code=400)
+    if person["role"] == "manager" and role != "manager":
+        reports = await _first(db.prepare("SELECT COUNT(*) count FROM users WHERE manager_id=?").bind(user_id))
+        if int(reports["count"] or 0):
+            return JSONResponse({"error": "Move this manager’s direct reports before changing their access class"}, status_code=409)
+    try:
+        await db.prepare("UPDATE users SET name=?,email=?,role=?,job_title=?,designation_id=COALESCE(?,designation_id),manager_id=? WHERE id=?").bind(
+            name, email, role, job_title, designation_id, manager_id, user_id).run()
+        await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'updated','team_member',?)").bind(user["id"], user_id).run()
+    except Exception:
+        return JSONResponse({"error": "Team member was not updated. Check that the email is unique."}, status_code=409)
+    return {"ok": True}
+
+
+@app.post("/api/team/update")
+async def update_team_reporting(request: Request):
+    user, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        user_id = int(data.get("user_id", 0))
+        manager_id = int(data["manager_id"]) if data.get("manager_id") else None
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "Choose a valid team member and manager"}, status_code=400)
+    db = _env(request).DB
+    person = await _first(db.prepare("SELECT id,role,manager_id FROM users WHERE id=? AND role IN ('manager','employee')").bind(user_id))
+    if not person:
+        return JSONResponse({"error": "Team member not found"}, status_code=404)
+    if user["role"] == "manager" and (person["role"] != "employee" or person["manager_id"] != user["id"]):
+        return JSONResponse({"error": "You can change reporting only for your direct employees"}, status_code=403)
+    if manager_id == user_id:
+        return JSONResponse({"error": "A manager cannot report to themselves"}, status_code=400)
+    if manager_id:
+        manager = await _first(db.prepare("SELECT id FROM users WHERE id=? AND role='manager' AND is_active=1").bind(manager_id))
+        if not manager:
+            return JSONResponse({"error": "Choose an active manager"}, status_code=400)
+        cycle = await _first(db.prepare(
+            "WITH RECURSIVE team(id) AS (SELECT id FROM users WHERE manager_id=? "
+            "UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id) "
+            "SELECT EXISTS(SELECT 1 FROM team WHERE id=?) member"
+        ).bind(user_id, manager_id))
+        if cycle["member"]:
+            return JSONResponse({"error": "That reporting change would create a loop"}, status_code=400)
+    await db.prepare("UPDATE users SET manager_id=? WHERE id=?").bind(manager_id, user_id).run()
+    await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'changed_reporting_line','user',?)").bind(user["id"], user_id).run()
+    return {"ok": True}
+
+
+@app.post("/api/team/status")
+async def update_team_status(request: Request):
+    user, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        user_id = int(data.get("user_id", 0))
+        active = _boolean(data.get("active"))
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "Choose a valid team member"}, status_code=400)
+    db = _env(request).DB
+    person = await _first(db.prepare("SELECT id,role,is_active,manager_id FROM users WHERE id=? AND role IN ('manager','employee')").bind(user_id))
+    if not person:
+        return JSONResponse({"error": "Team member not found"}, status_code=404)
+    if user["role"] == "manager" and (person["role"] != "employee" or person["manager_id"] != user["id"]):
+        return JSONResponse({"error": "You can manage access only for your direct employees"}, status_code=403)
+    if not active and person["role"] == "manager":
+        direct = await _first(db.prepare("SELECT COUNT(*) count FROM users WHERE manager_id=?").bind(user_id))
+        if int(direct["count"] or 0):
+            return JSONResponse({"error": "Reassign this manager’s direct reports before removing them"}, status_code=409)
+    await db.prepare("UPDATE users SET is_active=? WHERE id=?").bind(int(active), user_id).run()
+    if not active:
+        await db.prepare("DELETE FROM sessions WHERE user_id=?").bind(user_id).run()
+    await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,?, 'team_member',?)").bind(
+        user["id"], "activated" if active else "deactivated", user_id).run()
+    return {"ok": True, "active": active}
+
+
+@app.post("/api/team/reset-password")
+async def reset_team_password(request: Request):
+    user, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        user_id = int(data.get("user_id", 0))
+        password_hash = _hash_password(str(data.get("password", "")))
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Choose a valid team member and password"}, status_code=400)
+    db = _env(request).DB
+    person = await _first(db.prepare("SELECT id,manager_id FROM users WHERE id=? AND role IN ('manager','employee')").bind(user_id))
+    if not person:
+        return JSONResponse({"error": "Team member not found"}, status_code=404)
+    if user["role"] == "manager" and person["manager_id"] != user["id"]:
+        return JSONResponse({"error": "You can reset access only for your direct employees"}, status_code=403)
+    await db.prepare("UPDATE users SET password_hash=? WHERE id=?").bind(password_hash, user_id).run()
+    await db.prepare("DELETE FROM sessions WHERE user_id=?").bind(user_id).run()
+    await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'reset','team_member_password',?)").bind(user["id"], user_id).run()
+    return {"ok": True}
+
+
 @app.get("/api/team/messages")
 async def team_messages(request: Request):
     user, error = await _require_user(request, ("owner", "manager", "employee"))
@@ -686,6 +1057,100 @@ async def team_messages(request: Request):
         "recipient": r["recipient_name"], "remind_at": r["remind_at"], "read": bool(r["read_at"]),
         "completed": bool(r["completed_at"]), "created_at": r["created_at"],
         "direction": "inbox" if r["recipient_id"] == user["id"] else "sent"} for r in _rows(rows)]
+
+
+def _designation_json(row):
+    permissions = [key for key in _json_list(row["permissions_json"]) if key in ACCESS_FEATURES]
+    data_permissions = [key for key in _json_list(row["data_permissions_json"]) if key in DATA_ACCESS_OPTIONS]
+    return {"id": row["id"], "name": row["name"], "role_class": row["role_class"],
+            "permissions": permissions, "data_permissions": data_permissions, "system": bool(row["is_system"])}
+
+
+@app.get("/api/team/designations")
+async def designations(request: Request):
+    _, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    rows = await _env(request).DB.prepare("SELECT * FROM designations ORDER BY is_system DESC,name COLLATE NOCASE").all()
+    return {"features": [{"key": key, "label": label} for key, label in ACCESS_FEATURES.items()],
+            "data_options": [{"key": key, "label": label, "group": DATA_ACCESS_GROUPS[key]} for key, label in DATA_ACCESS_OPTIONS.items()],
+            "designations": [_designation_json(row) for row in _rows(rows)]}
+
+
+@app.post("/api/team/designations")
+async def save_designation(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        designation_id = int(data.get("id") or 0)
+        name = str(data.get("name", "")).strip()[:80]
+        role_class = str(data.get("role_class", "employee"))
+        raw_permissions, raw_data = data.get("permissions", []), data.get("data_permissions", [])
+        if not name or role_class not in ("manager", "employee") or not isinstance(raw_permissions, list) or not isinstance(raw_data, list):
+            raise ValueError("Enter a designation, access class and feature choices")
+        permitted_features = set(ACCESS_FEATURES)
+        permitted_features.discard("team" if role_class == "employee" else "my-students")
+        permissions = sorted({str(key) for key in raw_permissions if str(key) in permitted_features})
+        data_permissions = sorted({str(key) for key in raw_data if str(key) in DATA_ACCESS_OPTIONS})
+        if not permissions:
+            raise ValueError("Enable at least one workspace feature")
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Check designation permissions"}, status_code=400)
+    db = _env(request).DB
+    try:
+        if designation_id:
+            existing = await _first(db.prepare("SELECT id,name,role_class,is_system FROM designations WHERE id=?").bind(designation_id))
+            if not existing:
+                return JSONResponse({"error": "Designation not found"}, status_code=404)
+            if existing["is_system"] and (name != existing["name"] or role_class != existing["role_class"]):
+                return JSONResponse({"error": "Built-in access classes keep their system name and reporting class"}, status_code=400)
+            if existing["role_class"] == "manager" and role_class == "employee":
+                reports = await _first(db.prepare("SELECT COUNT(*) count FROM users WHERE designation_id=? AND EXISTS(SELECT 1 FROM users direct WHERE direct.manager_id=users.id)").bind(designation_id))
+                if int(reports["count"] or 0):
+                    return JSONResponse({"error": "Reassign the direct reports of these managers before changing this designation"}, status_code=409)
+            await db.prepare("UPDATE designations SET name=?,role_class=?,permissions_json=?,data_permissions_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(
+                name, role_class, json.dumps(permissions), json.dumps(data_permissions), designation_id).run()
+            if existing["role_class"] != role_class:
+                await db.prepare("UPDATE users SET role=? WHERE designation_id=?").bind(role_class, designation_id).run()
+            action = "updated"
+        else:
+            result = await _first(db.prepare("INSERT INTO designations(name,role_class,permissions_json,data_permissions_json) VALUES(?,?,?,?) RETURNING *").bind(
+                name, role_class, json.dumps(permissions), json.dumps(data_permissions)))
+            designation_id = result["id"]
+            action = "created"
+        saved = await _first(db.prepare("SELECT * FROM designations WHERE id=?").bind(designation_id))
+        await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,?, 'designation',?)").bind(user["id"], action, designation_id).run()
+    except Exception:
+        return JSONResponse({"error": "Designation could not be saved. Check that its name is unique."}, status_code=409)
+    return JSONResponse(_designation_json(saved), status_code=200 if data.get("id") else 201)
+
+
+@app.post("/api/team/designations/delete")
+async def delete_designation(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        designation_id = int(data.get("id", 0))
+        if data.get("confirmed") is not True:
+            raise ValueError("Confirm the designation deletion")
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Choose a designation"}, status_code=400)
+    db = _env(request).DB
+    designation = await _first(db.prepare("SELECT id,is_system FROM designations WHERE id=?").bind(designation_id))
+    if not designation:
+        return JSONResponse({"error": "Designation not found"}, status_code=404)
+    if designation["is_system"]:
+        return JSONResponse({"error": "Built-in designations cannot be removed"}, status_code=409)
+    assigned = await _first(db.prepare("SELECT COUNT(*) count FROM users WHERE designation_id=?").bind(designation_id))
+    if int(assigned["count"] or 0):
+        return JSONResponse({"error": "Reassign every account using this designation before removing it"}, status_code=409)
+    await db.prepare("DELETE FROM designations WHERE id=?").bind(designation_id).run()
+    await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'deleted','designation',?)").bind(user["id"], designation_id).run()
+    return {"ok": True}
 
 
 @app.get("/api/team/message-recipients")
