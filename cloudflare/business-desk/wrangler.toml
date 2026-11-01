@@ -1,0 +1,16 @@
+name = "offtune-business-desk"
+main = "src/worker.py"
+compatibility_date = "2026-11-01"
+compatibility_flags = ["python_workers"]
+workers_dev = true
+
+[assets]
+directory = "../../web"
+binding = "ASSETS"
+run_worker_first = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "offtune-business-desk"
+database_id = "3d9fe339-cc67-4392-940b-7e6bcb9b0556"
+migrations_dir = "../migrations"
