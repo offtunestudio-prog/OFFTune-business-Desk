@@ -561,9 +561,16 @@ async def auth_login(request: Request):
 async def auth_logout(request: Request):
     cookie = request.cookies.get("offtune_session")
     if cookie:
-        await _env(request).DB.prepare("DELETE FROM sessions WHERE token_hash=?").bind(
-            hashlib.sha256(cookie.encode()).hexdigest()
-        ).run()
+        digest = hashlib.sha256(cookie.encode()).hexdigest()
+        session = await _env(request).DB.prepare(
+            "SELECT csrf FROM sessions WHERE token_hash=? AND expires_at>?"
+        ).bind(digest, int(time.time())).first()
+        if session and not hmac.compare_digest(
+            str(request.headers.get("x-csrf-token", "")), str(session["csrf"])
+        ):
+            return JSONResponse({"error": "Refresh the page and try again"}, status_code=403)
+        if session:
+            await _env(request).DB.prepare("DELETE FROM sessions WHERE token_hash=?").bind(digest).run()
     response = JSONResponse({"ok": True})
     response.delete_cookie("offtune_session", path="/", secure=True, httponly=True, samesite="strict")
     return response
