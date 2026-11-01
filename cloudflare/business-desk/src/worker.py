@@ -1,5 +1,5 @@
-Warning: truncated output (original token count: 42409)
-Total output lines: 2566
+Warning: truncated output (original token count: 47289)
+Total output lines: 2856
 
 """Cloudflare Worker entry point for OFFTune Business Desk."""
 
@@ -30,6 +30,14 @@ BUSINESS_SETTING_DEFAULTS = {
     "expense_categories": "Ads & Marketing,Software & Tools,Salary,Equipment,Utilities,Office Expense,Miscellaneous",
     "payment_methods": "Cash,UPI,Bank Transfer,Cheque,Card,Other", "followup_reminder_lead_days": "5",
 }
+REMINDER_STAGE_DEFAULTS = [
+    {"offset_days": -5, "label": "5 days before", "subject": "Upcoming payment · {order_no}", "body": "Hello {student}, your installment of {amount_due} is due on {due_date}. Please plan your payment."},
+    {"offset_days": -1, "label": "1 day before", "subject": "Payment due tomorrow · {order_no}", "body": "Hello {student}, your installment of {amount_due} is due tomorrow ({due_date}). Please make the payment on time."},
+    {"offset_days": 0, "label": "Due today", "subject": "Payment due today · {order_no}", "body": "Hello {student}, your installment of {amount_due} is due today ({due_date}). Please pay today or contact our team if you need help."},
+    {"offset_days": 3, "label": "3 days overdue", "subject": "Missed installment · {order_no}", "body": "Hello {student}, we have not recorded your installment payment of {amount_due}, due {due_date}. Please pay now."},
+    {"offset_days": 5, "label": "5 days overdue", "subject": "Payment follow-up · {order_no}", "body": "Hello {student}, your installment remains unpaid. Please arrange payment or contact our team."},
+]
+REMINDER_INSTALLMENT_TYPES = ("booking", "admission", "emi", "balance")
 ACCESS_FEATURES = {
     "overview": "Overview", "targets": "Targets", "collections": "Finance Desk & collections",
     "followup": "Follow-up", "products": "Products & courses", "incentives": "Incentives",
@@ -989,123 +997,7 @@ async def update_team_profile(request: Request):
 @app.post("/api/team/update")
 async def update_team_reporting(request: Request):
     user, error = await _require_user(request, ("owner", "manager"))
-    if error:
-        return error
-    try:
-        data = await request.json()
-        user_id = int(data.get("user_id", 0))
-        manager_id = int(data["manager_id"]) if data.get("manager_id") else None
-    except (ValueError, TypeError):
-        return JSONResponse({"error": "Choose a valid team member and manager"}, status_code=400)
-    db = _env(request).DB
-    person = await _first(db.prepare("SELECT id,role,manager_id FROM users WHERE id=? AND role IN ('manager','employee')").bind(user_id))
-    if not person:
-        return JSONResponse({"error": "Team member not found"}, status_code=404)
-    if user["role"] == "manager" and (person["role"] != "employee" or person["manager_id"] != user["id"]):
-        return JSONResponse({"error": "You can change reporting only for your direct employees"}, status_code=403)
-    if manager_id == user_id:
-        return JSONResponse({"error": "A manager cannot report to themselves"}, status_code=400)
-    if manager_id:
-        manager = await _first(db.prepare("SELECT id FROM users WHERE id=? AND role='manager' AND is_active=1").bind(manager_id))
-        if not manager:
-            return JSONResponse({"error": "Choose an active manager"}, s…12409 tokens truncated…    course_weeks.append({"week_start": cursor.isoformat(), "week_end": (week_end - timedelta(days=1)).isoformat(), "base_target": base, "carry_in": course_carry, "target": goal_week, "completed": completed_week, "remaining": remaining_week, "status": status_week})
-            if week_end <= today:
-                course_carry = remaining_week
-            cursor = week_end
-        course_current = next((week for week in course_weeks if week["week_start"] <= today.isoformat() <= week["week_end"]), None)
-        course_targets.append({"product_id": product_id, "name": course["name"], "currency": course["currency"],
-            "target": goal, "unit_price": price / 100, "estimated_income": goal * price / 100,
-            "actual_income_estimate": completed * price / 100, "completed": completed,
-            "sales_completed": sales_count, "reported_completed": len(unmatched),
-            "remaining": max(0, goal - completed), "percent": round(min(100, completed / goal * 100), 1) if goal else 0,
-            "commission_rate": rate, "estimated_incentive": round(goal * price * seller_rate / 100) / 100,
-            "earned_incentive_estimate": round(completed * price * seller_rate / 100) / 100,
-            "manager_share_estimate": round(goal * price * manager_rate / 100) / 100,
-            "current_week": course_current, "weeks": course_weeks, "reports": unmatched})
-    if course_targets:
-        target = sum(c["target"] for c in course_targets)
-        completed_count = sum(c["completed"] for c in course_targets)
-    else:
-        completed_count = int(actual["n"] or 0)
-    month_end = end
-    cursor = start - timedelta(days=start.weekday())
-    today = date.today()
-    weekly = []
-    carry = 0
-    current_week = today - timedelta(days=today.weekday())
-    while cursor < month_end:
-        week_end = cursor + timedelta(days=7)
-        allocation = await _first(db.prepare("SELECT conversion_target FROM target_week_allocations WHERE user_id=? AND month_period=? AND week_start=?").bind(person["id"], month, cursor.isoformat()))
-        override = await _first(db.prepare("SELECT conversion_target FROM targets WHERE user_id=? AND period=? AND period_type='weekly'").bind(person["id"], cursor.isoformat()))
-        base = int(override["conversion_target"] if override else (allocation["conversion_target"] if allocation else 0))
-        actual_week = await _first(db.prepare("SELECT COUNT(*) n FROM orders WHERE employee_id=? AND status='active' AND order_date>=? AND order_date<?").bind(person["id"], max(start, cursor).isoformat(), min(month_end, week_end, today + timedelta(days=1)).isoformat()))
-        done = int(actual_week["n"] or 0)
-        weekly_goal = base + carry
-        remaining = max(0, weekly_goal - done)
-        status = "completed" if weekly_goal and remaining == 0 else "overdue" if week_end <= today and remaining else "current" if cursor <= today < week_end and weekly_goal else "upcoming" if weekly_goal else "no_goal"
-        weekly.append({"week_start": cursor.isoformat(), "week_end": (week_end - timedelta(days=1)).isoformat(), "base_target": base, "carry_in": carry, "target": weekly_goal, "completed": done, "remaining": remaining, "status": status, "manual": bool(override)})
-        if cursor <= current_week < week_end:
-            carry_current = carry
-            current_week_data = weekly[-1]
-        if week_end <= today:
-            carry = remaining
-        cursor = week_end
-    if not weekly:
-        carry_current, current_week_data = 0, {"target": 0, "completed": 0, "remaining": 0}
-    else:
-        current_week_data = next((w for w in weekly if w["week_start"] <= today.isoformat() <= w["week_end"]), weekly[0])
-        carry_current = current_week_data["carry_in"]
-    if course_targets:
-        week_map = {}
-        for course in course_targets:
-            for item in course["weeks"]:
-                entry = week_map.setdefault(item["week_start"], {"week_start": item["week_start"], "week_end": item["week_end"], "base_target": 0, "carry_in": 0, "target": 0, "completed": 0, "remaining": 0, "status": item["status"], "manual": False})
-                for key in ("base_target", "carry_in", "target", "completed", "remaining"):
-                    entry[key] += item[key]
-                if item["status"] == "overdue": entry["status"] = "overdue"
-                elif item["status"] == "current" and entry["status"] != "overdue": entry["status"] = "current"
-        weekly = list(week_map.values())
-        current_week_data = next((w for w in weekly if w["week_start"] <= today.isoformat() <= w["week_end"]), weekly[0] if weekly else {"target": 0, "completed": 0, "remaining": 0, "carry_in": 0})
-        carry_current = current_week_data["carry_in"]
-    price_goal = sum(c["estimated_income"] for c in course_targets) if course_targets else 0
-    own_incentive = sum(c["estimated_incentive"] for c in course_targets) if course_targets else 0
-    team_share = sum(c["manager_share_estimate"] for c in course_targets) if course_targets else 0
-    return {"id": person["id"], "name": person["name"], "email": person["email"], "role": person["role"], "manager_id": person["manager_id"],
-        "monthly_target": target, "assigned_by": saved["assigned_by"] if saved else None, "monthly_completed": completed_count,
-        "monthly_remaining": max(0, target - completed_count), "monthly_percent": round(min(100, completed_count / target * 100), 1) if target else 0,
-        "current_week_target": current_week_data["target"], "current_week_completed": current_week_data["completed"],
-        "current_week_remaining": current_week_data["remaining"], "carry_forward": carry_current, "weeks": weekly,
-        "course_targets": course_targets, "estimated_income": price_goal, "actual_income_estimate": sum(c["actual_income_estimate"] for c in course_targets),
-        "estimated_own_incentive": own_incentive, "estimated_manager_share": team_share,
-        "estimated_team_incentive": 0, "estimated_total_incentive": own_incentive + team_share}
-
-
-@app.get("/api/targets")
-async def targets(request: Request):
-    user, error = await _require_user(request, ("owner", "manager"))
-    if error:
-        return error
-    month = _month_key(request.query_params.get("month"))
-    db = _env(request).DB
-    people = _rows(await _target_user_scope(db, user))
-    plans = [await _target_plan_for_person(db, person, month) for person in people]
-    by_id = {plan["id"]: plan for plan in plans}
-    for manager in (plan for plan in plans if plan["role"] == "manager"):
-        descendants, frontier = set(), [manager["id"]]
-        while frontier:
-            parent = frontier.pop()
-            for child in plans:
-                if child["manager_id"] == parent and child["id"] not in descendants:
-                    descendants.add(child["id"])
-                    frontier.append(child["id"])
-        manager["team_conversion_target"] = sum(by_id[uid]["monthly_target"] for uid in descendants)
-        manager["estimated_team_incentive"] = round(sum(by_id[uid]["estimated_manager_share"] for uid in descendants if by_id[uid]["role"] == "employee"), 2)
-        manager["estimated_total_incentive"] = round(manager["estimated_own_incentive"] + manager["estimated_team_incentive"], 2)
-    rates = {"pool_rate": float(await _setting(db, "incentive_pool_rate", "5")), "rep_rate": float(await _setting(db, "incentive_rep_rate", "2")), "manager_rate": float(await _setting(db, "incentive_manager_rate", "3"))}
-    if user["role"] == "manager":
-        for plan in plans:
-            for key in ("estimated_income", "actual_income_estimate"):
-                plan.pop(key, None)
+    if erro…17289 tokens truncated…one)
             for course in plan["course_targets"]:
                 for key in ("unit_price", "estimated_income", "actual_income_estimate", "sales_completed"):
                     course.pop(key, None)
@@ -1271,6 +1163,108 @@ async def report_target_conversion(request: Request):
     week = converted - timedelta(days=converted.weekday())
     await db.prepare("INSERT INTO target_conversion_reports(user_id,month_period,week_start,product_id,student_name,converted_on,notes,reported_by) VALUES(?,?,?,?,?,?,?,?)").bind(user["id"], month, week.isoformat(), product_id, student, converted.isoformat(), str(data.get("notes", "")).strip()[:500], user["id"]).run()
     await _audit(db, user["id"], "reported_conversion", "target_course", product_id)
+    return {"ok": True}
+
+
+async def _batch_assignment_statements(db, user, assignments, *, order_id=None, customer_id=None):
+    if not isinstance(assignments, list) or not assignments or len(assignments) > 100:
+        raise ValueError("Choose one or more course batch changes")
+    checked, seen, pending_links = [], set(), {}
+    for assignment in assignments:
+        item_id = int(assignment.get("order_item_id", 0))
+        if item_id in seen:
+            raise ValueError("A course was included more than once")
+        seen.add(item_id)
+        where = "oi.id=? AND o.status='active'"
+        binds = [item_id]
+        if order_id is not None:
+            where += " AND o.id=?"; binds.append(order_id)
+        if customer_id is not None:
+            where += " AND o.customer_id=?"; binds.append(customer_id)
+        if user["role"] == "manager":
+            where += " AND o.employee_id IN (WITH RECURSIVE team(id) AS (SELECT ? UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) SELECT id FROM team)"
+            binds.append(user["id"])
+        item = await _first(db.prepare("SELECT oi.id,oi.order_id,oi.product_id,oi.batch_id,p.product_type,p.active,o.customer_id FROM order_items oi JOIN products p ON p.id=oi.product_id JOIN orders o ON o.id=oi.order_id WHERE " + where).bind(*binds))
+        if not item or item["product_type"] != "course":
+            raise ValueError("That course is not part of this visible record")
+        raw_batch = assignment.get("batch_id")
+        batch_id = int(raw_batch) if raw_batch not in (None, "") else None
+        if batch_id is not None:
+            batch = await _first(db.prepare("SELECT id,product_id,status FROM batches WHERE id=?").bind(batch_id))
+            if not batch or batch["status"] not in ("active", "setup_needed") or batch["product_id"] not in (None, item["product_id"]):
+                raise ValueError("Choose an active batch for the same course")
+            if batch["product_id"] is None:
+                if batch_id in pending_links and pending_links[batch_id] != item["product_id"]:
+                    raise ValueError("A batch can only be assigned to one course")
+                pending_links[batch_id] = item["product_id"]
+        checked.append((item["id"], item["batch_id"], batch_id, item["product_id"], bool(item["active"])))
+    statements, changed = [], 0
+    for item_id, old_batch, new_batch, product_id, product_active in checked:
+        if old_batch == new_batch:
+            continue
+        if new_batch is not None:
+            statements.append(db.prepare("UPDATE batches SET product_id=?,status=? WHERE id=? AND product_id IS NULL").bind(product_id, "active" if product_active else "setup_needed", new_batch))
+        statements.append(db.prepare("UPDATE order_items SET batch_id=? WHERE id=?").bind(new_batch, item_id))
+        statements.append(db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,?, 'order_item',?)").bind(user["id"], "assigned" if old_batch is None else "reassigned", item_id))
+        changed += 1
+    return statements, changed
+
+
+@app.post("/api/orders/batches")
+async def update_order_batches(request: Request):
+    user, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        order_id = int(data.get("order_id", 0))
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Choose an order"}, status_code=400)
+    db = _env(request).DB
+    order = await _first(db.prepare("SELECT id FROM orders WHERE id=? AND status='active'").bind(order_id))
+    if not order:
+        return JSONResponse({"error": "Order not found"}, status_code=404)
+    try:
+        statements, changed = await _batch_assignment_statements(db, user, data.get("assignments"), order_id=order_id)
+        if statements:
+            await db.batch(statements)
+    except (ValueError, TypeError, AttributeError) as exc:
+        return JSONResponse({"error": str(exc) or "Check the batch assignments"}, status_code=400)
+    except Exception:
+        return JSONResponse({"error": "The batch assignment was not saved; refresh and retry"}, status_code=409)
+    return {"ok": True, "changed": changed}
+
+
+@app.post("/api/customers/update")
+async def update_customer(request: Request):
+    user, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        customer_id = int(data.get("customer_id", 0))
+        name = str(data.get("name", "")).strip()[:120]
+        phone = str(data.get("phone", "")).strip()[:40]
+        email = str(data.get("email", "")).strip()[:160]
+        if not name:
+            raise ValueError("Student name is required")
+        if email and ("@" not in email or email.startswith("@") or email.endswith("@")):
+            raise ValueError("Enter a valid email address")
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Check the student details"}, status_code=400)
+    db = _env(request).DB
+    customer = await _first(db.prepare("SELECT id FROM customers WHERE id=?").bind(customer_id))
+    if not customer:
+        return JSONResponse({"error": "Student not found"}, status_code=404)
+    try:
+        statements, _ = await _batch_assignment_statements(db, user, data.get("assignments", []), customer_id=customer_id) if data.get("assignments") else ([], 0)
+        statements.insert(0, db.prepare("UPDATE customers SET name=?,phone=?,email=? WHERE id=?").bind(name, phone, email, customer_id))
+        statements.append(db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'updated','customer',?)").bind(user["id"], customer_id))
+        await db.batch(statements)
+    except (ValueError, TypeError, AttributeError) as exc:
+        return JSONResponse({"error": str(exc) or "Check the course changes"}, status_code=400)
+    except Exception:
+        return JSONResponse({"error": "Student details were not updated; refresh and retry"}, status_code=409)
     return {"ok": True}
 
 
@@ -1701,6 +1695,36 @@ async def invoice_preview(invoice_id: int, request: Request):
 async def invoice_detail(request: Request, invoice_id: int):
     detail, error = await _invoice_detail(request, invoice_id)
     return error if error else detail
+
+
+@app.post("/api/invoices/delete")
+async def delete_invoice(request: Request):
+    user, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        invoice_id = int(data.get("invoice_id", 0))
+        if data.get("confirmed") is not True:
+            raise ValueError("Confirm the invoice deletion")
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Choose an invoice"}, status_code=400)
+    db = _env(request).DB
+    scope = ""
+    binds = [invoice_id]
+    if user["role"] == "manager":
+        scope = " AND o.employee_id IN (WITH RECURSIVE team(id) AS (SELECT ? UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) SELECT id FROM team)"
+        binds.append(user["id"])
+    invoice = await _first(db.prepare("SELECT i.id,i.invoice_no FROM invoices i JOIN orders o ON o.id=i.order_id WHERE i.id=?" + scope).bind(*binds))
+    if not invoice:
+        return JSONResponse({"error": "Invoice not found"}, status_code=404)
+    await db.batch([
+        db.prepare("DELETE FROM invoice_items WHERE invoice_id=?").bind(invoice_id),
+        db.prepare("DELETE FROM invoice_profiles WHERE invoice_id=?").bind(invoice_id),
+        db.prepare("DELETE FROM invoices WHERE id=?").bind(invoice_id),
+        db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'deleted','invoice',?)").bind(user["id"], invoice_id),
+    ])
+    return {"ok": True}
 
 
 @app.post("/api/auth/setup")
