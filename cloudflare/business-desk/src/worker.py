@@ -1,6 +1,7 @@
 """Cloudflare Worker entry point for OFFTune Business Desk."""
 
 import hashlib
+import html
 import hmac
 import json
 import secrets
@@ -391,6 +392,127 @@ async def invoices(request: Request):
                        "status": r["status"], "currency": r["currency"], "total": _money(total),
                        "received": _money(received), "balance": _money(max(0, total - received))})
     return result
+
+
+async def _invoice_detail(request: Request, invoice_id: int):
+    user, error = await _require_user(request, ("owner", "manager", "employee"))
+    if error:
+        return None, error
+    db = _env(request).DB
+    scope = ""
+    binds = [invoice_id]
+    if user["role"] == "manager":
+        scope = " AND o.employee_id IN (WITH RECURSIVE team(id) AS (SELECT id FROM users WHERE manager_id=? AND is_active=1 UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) SELECT id FROM team UNION SELECT ?)"
+        binds.extend([user["id"], user["id"]])
+    row = await db.prepare(
+        "SELECT i.id,i.order_id,i.invoice_no,i.issued_on,i.status,i.invoice_kind,i.installment_id,"
+        "o.order_no,o.order_date,o.currency,o.subtotal_minor,o.discount_minor,o.tax_minor,o.total_minor,"
+        "c.name customer,c.phone,c.email,ip.business_name,ip.business_email,ip.business_phone,ip.business_website,"
+        "ip.business_address,ip.business_tax_id,ip.logo_data,ip.customer_name,ip.customer_phone,ip.customer_email,"
+        "ip.currency snap_currency,ip.order_no snap_order_no,ip.order_date snap_order_date,ip.subtotal_minor snap_subtotal_minor,"
+        "ip.discount_minor snap_discount_minor,ip.tax_minor snap_tax_minor,ip.total_minor snap_total_minor,"
+        "ip.installment_received_minor FROM invoices i JOIN orders o ON o.id=i.order_id "
+        "JOIN customers c ON c.id=o.customer_id LEFT JOIN invoice_profiles ip ON ip.invoice_id=i.id "
+        "WHERE i.id=?" + scope
+    ).bind(*binds).first()
+    if not row:
+        return None, JSONResponse({"error": "Invoice not found"}, status_code=404)
+    received_row = await db.prepare(
+        "SELECT COALESCE(SUM(amount_minor),0) n FROM payment_allocations WHERE installment_id=?"
+    ).bind(row["installment_id"]).first() if row["installment_id"] else await db.prepare(
+        "SELECT COALESCE(SUM(CASE WHEN payment_type='receipt' THEN amount_minor ELSE -amount_minor END),0) n FROM payments WHERE order_id=?"
+    ).bind(row["order_id"]).first()
+    received = int(received_row["n"] or 0)
+    if row["installment_id"]:
+        received = max(0, received - int(row["installment_received_minor"] or 0))
+    has_snapshot = bool(row["business_name"])
+    if has_snapshot:
+        items_rows = await db.prepare(
+            "SELECT product_type,sku,description name,batch_name,quantity,unit_price_minor,discount_minor,line_total_minor "
+            "FROM invoice_items WHERE invoice_id=? ORDER BY id"
+        ).bind(invoice_id).all()
+    else:
+        items_rows = await db.prepare(
+            "SELECT p.product_type,p.sku,p.name,COALESCE(b.name,'') batch_name,oi.quantity,oi.unit_price_minor,oi.discount_minor,oi.line_total_minor "
+            "FROM order_items oi JOIN products p ON p.id=oi.product_id LEFT JOIN batches b ON b.id=oi.batch_id "
+            "WHERE oi.order_id=? ORDER BY oi.id"
+        ).bind(row["order_id"]).all()
+    total = int((row["snap_total_minor"] if has_snapshot else row["total_minor"]) or 0)
+    subtotal = int((row["snap_subtotal_minor"] if has_snapshot else row["subtotal_minor"]) or 0)
+    discount = int((row["snap_discount_minor"] if has_snapshot else row["discount_minor"]) or 0)
+    tax = int((row["snap_tax_minor"] if has_snapshot else row["tax_minor"]) or 0)
+    inst = await db.prepare("SELECT installment_no,due_date FROM installments WHERE id=?").bind(row["installment_id"]).first() if row["installment_id"] else None
+    sched_rows = await db.prepare(
+        "SELECT i.installment_no,i.due_date,i.amount_minor,COALESCE(SUM(pa.amount_minor),0) received_minor "
+        "FROM installments i LEFT JOIN payment_allocations pa ON pa.installment_id=i.id "
+        "WHERE i.order_id=? GROUP BY i.id ORDER BY i.installment_no"
+    ).bind(row["order_id"]).all()
+    schedule = [{"installment_no": r["installment_no"], "due_date": r["due_date"],
+        "amount": _money(r["amount_minor"]), "received": _money(r["received_minor"]),
+        "balance": _money(max(0, int(r["amount_minor"] or 0) - int(r["received_minor"] or 0))),
+        "status": "Paid" if int(r["amount_minor"] or 0) <= int(r["received_minor"] or 0) else "Part paid" if r["received_minor"] else "Unpaid"}
+        for r in sched_rows["results"]]
+    if inst:
+        schedule = [r for r in schedule if r["installment_no"] == inst["installment_no"]]
+        for entry in schedule:
+            entry.update({"amount": _money(total), "received": _money(min(total, max(0, received))),
+                          "balance": _money(max(0, total - received)),
+                          "status": "Paid" if total <= received else "Part paid" if received else "Unpaid"})
+    settings_rows = await db.prepare("SELECT key,value FROM settings WHERE key IN ('business_name','business_email','business_phone','business_website','business_address','business_tax_id','invoice_logo_data')").all()
+    cfg = {r["key"]: r["value"] for r in settings_rows["results"]}
+    money_total = max(0, total)
+    payload = {"invoice_no": row["invoice_no"], "issued_on": row["issued_on"],
+        "invoice_kind": row["invoice_kind"] or "order", "status": row["status"],
+        "installment_no": inst["installment_no"] if inst else None,
+        "due_date": inst["due_date"] if inst else "", "document_title": "Installment invoice" if inst else "Invoice",
+        "order_no": row["snap_order_no"] if has_snapshot else row["order_no"],
+        "order_date": row["snap_order_date"] if has_snapshot else row["order_date"],
+        "business_name": row["business_name"] if has_snapshot else cfg.get("business_name", "OFFTune Business Desk"),
+        "business_email": row["business_email"] if has_snapshot else cfg.get("business_email", ""),
+        "business_phone": row["business_phone"] if has_snapshot else cfg.get("business_phone", ""),
+        "business_website": row["business_website"] if has_snapshot else cfg.get("business_website", ""),
+        "business_address": row["business_address"] if has_snapshot else cfg.get("business_address", ""),
+        "business_tax_id": row["business_tax_id"] if has_snapshot else cfg.get("business_tax_id", ""),
+        "invoice_logo_data": row["logo_data"] if has_snapshot else cfg.get("invoice_logo_data", ""),
+        "currency": row["snap_currency"] if has_snapshot else row["currency"],
+        "customer": {"name": row["customer_name"] if has_snapshot else row["customer"],
+            "phone": row["customer_phone"] if has_snapshot else row["phone"],
+            "email": row["customer_email"] if has_snapshot else row["email"]},
+        "items": [{"product_type": x["product_type"], "sku": x["sku"], "name": x["name"],
+            "batch": x["batch_name"], "quantity": x["quantity"], "unit_price": _money(x["unit_price_minor"]),
+            "discount": _money(x["discount_minor"]), "line_total": _money(x["line_total_minor"])} for x in items_rows["results"]],
+        "payment_schedule": schedule, "subtotal": _money(subtotal), "discount": _money(discount),
+        "tax": _money(tax), "total": _money(money_total), "received": _money(min(money_total, max(0, received))),
+        "balance": _money(max(0, money_total - received)), "template": {"style": "studio", "accent_color": "#e51b2b"}}
+    return payload, None
+
+
+def _invoice_html(data):
+    esc = lambda value: html.escape(str(value or ""), quote=True)
+    lines = "".join(f"<tr><td><b>{esc(item['name'])}</b><small>{esc(item.get('batch') or item.get('sku') or '')}</small></td><td>{esc(item['quantity'])}</td><td>{esc(item['unit_price'])}</td><td>{esc(item['discount'])}</td><td><b>{esc(item['line_total'])}</b></td></tr>" for item in data["items"])
+    logo = f"<img class='logo' src='{esc(data['invoice_logo_data'])}' alt='OFFTune logo'>" if data.get("invoice_logo_data", "").startswith("data:image/") else ""
+    website = f"<a href='{esc(data['business_website'])}'>{esc(data['business_website'])}</a>" if data.get("business_website", "").startswith(("https://", "http://")) else ""
+    status = "PAID" if float(data["balance"].replace(",", "")) == 0 else "BALANCE DUE"
+    return "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><meta charset='utf-8'><title>" + esc(data["invoice_no"]) + "</title><style>body{margin:0;background:#f3f5f9;color:#182033;font:15px Arial,sans-serif}.sheet{max-width:760px;margin:24px auto;background:#fff;border-radius:18px;overflow:hidden;box-shadow:0 18px 60px #17253d18}.bar{height:8px;background:#e51b2b}.pad{padding:34px}.top,.meta,.summary{display:flex;justify-content:space-between;gap:20px}.brand{display:flex;align-items:center;gap:12px}.logo{width:48px;height:48px;object-fit:contain}.muted,small{display:block;color:#788195;margin-top:6px}.number{text-align:right}.number h1{font-size:29px;margin:0}.pill{display:inline-block;margin-top:10px;padding:8px 12px;border-radius:30px;background:#fff0f0;color:#bd1725;font-size:11px;font-weight:bold;letter-spacing:.08em}.meta{margin:34px 0;padding:20px;background:#f7f8fb;border-radius:12px}.meta b{display:block;margin-top:7px}.meta label{color:#788195;font-size:10px;letter-spacing:.12em;font-weight:bold}table{width:100%;border-collapse:collapse}th{text-align:left;color:#788195;font-size:10px;letter-spacing:.08em;padding:12px 8px;border-bottom:1px solid #e9ecf2}td{padding:15px 8px;border-bottom:1px solid #edf0f4;font-size:13px}td:first-child{width:42%}.summary{margin-top:26px}.totals{width:260px;margin-left:auto}.totals div{display:flex;justify-content:space-between;padding:7px 0;color:#687286}.totals .grand{border-top:1px solid #e2e6ee;padding-top:14px;color:#182033;font-size:17px;font-weight:bold}.balance{margin-top:16px;padding:18px;border-radius:12px;background:#fff7e9;display:flex;justify-content:space-between;color:#8a5600;font-weight:bold}.foot{margin-top:30px;padding-top:18px;border-top:1px solid #edf0f4;color:#788195;font-size:12px}@media(max-width:600px){.sheet{margin:0;border-radius:0}.pad{padding:22px 16px}.top{align-items:flex-start}.number h1{font-size:21px}.meta{padding:14px;gap:10px}.meta label{font-size:9px}table{font-size:11px}th,td{padding:10px 4px}td:first-child{width:38%}.totals{width:100%}.summary{display:block}.total-label{font-size:12px}}</style></head><body><main class='sheet'><div class='bar'></div><div class='pad'><header class='top'><div class='brand'>"+logo+"<div><b>"+esc(data["business_name"])+"</b><small>"+esc(data.get("business_email"))+"</small><small>"+esc(data.get("business_phone"))+" · "+website+"</small></div></div><div class='number'><h1>INVOICE</h1><b>"+esc(data["invoice_no"])+"</b><span class='pill'>"+status+"</span></div></header><section class='meta'><div><label>BILL TO</label><b>"+esc(data["customer"].get("name"))+"</b><small>"+esc(data["customer"].get("email"))+"</small><small>"+esc(data["customer"].get("phone"))+"</small></div><div><label>ISSUED</label><b>"+esc(data["issued_on"])+"</b><small>Order "+esc(data["order_no"])+"</small></div><div><label>PAYMENT DUE</label><b>"+esc(data.get("due_date") or "As scheduled")+"</b></div></section><table><thead><tr><th>DESCRIPTION</th><th>QTY</th><th>PRICE</th><th>DISCOUNT</th><th>AMOUNT</th></tr></thead><tbody>"+lines+"</tbody></table><section class='summary'><div></div><div class='totals'><div><span>Subtotal</span><b>"+esc(data["subtotal"])+"</b></div><div><span>Discount</span><b>− "+esc(data["discount"])+"</b></div><div><span>Tax</span><b>"+esc(data["tax"])+"</b></div><div class='grand'><span>Total</span><b>"+esc(data["total"])+"</b></div><div><span>Received</span><b>"+esc(data["received"])+"</b></div><div class='balance'><span>Balance due</span><span>"+esc(data["balance"])+"</span></div></div></section><footer class='foot'>Thank you for choosing "+esc(data["business_name"])+". Please contact us if you need help with this invoice.<br>"+website+"</footer></div></main></body></html>"
+
+
+@app.get("/api/invoices/{invoice_id}/preview")
+async def invoice_preview(invoice_id: int, request: Request):
+    detail, error = await _invoice_detail(request, invoice_id)
+    if error:
+        return error
+    recipient = detail["customer"].get("email") or ""
+    masked = (recipient[:1] + "•••@" + recipient.split("@", 1)[1]) if "@" in recipient else ""
+    return {"html": _invoice_html(detail), "invoice_no": detail["invoice_no"],
+        "recipient_hint": masked, "can_send": False,
+        "send_block_reason": "Hosted email delivery has not been connected yet.",
+        "pay_link_expected": float(detail["balance"].replace(",", "")) > 0}
+
+
+@app.get("/api/invoices/{invoice_id}")
+async def invoice_detail(request: Request, invoice_id: int):
+    detail, error = await _invoice_detail(request, invoice_id)
+    return error if error else detail
 
 
 @app.post("/api/auth/setup")
