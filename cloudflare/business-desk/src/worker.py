@@ -21,7 +21,7 @@ from workers import asgi
 
 app = FastAPI()
 SESSION_TTL = 60 * 60 * 12
-PBKDF2_ROUNDS = 310_000
+PBKDF2_ROUNDS = 100_000
 BUSINESS_SETTING_DEFAULTS = {
     "business_name": "OFFTune", "business_email": "", "business_phone": "", "business_website": "",
     "business_address": "", "business_tax_id": "", "currency": "INR", "invoice_prefix": "OFT",
