@@ -1,9 +1,11 @@
-Warning: truncated output (original token count: 47289)
-Total output lines: 2856
+Warning: truncated output (original token count: 52449)
+Total output lines: 3198
 
 """Cloudflare Worker entry point for OFFTune Business Desk."""
 
 import hashlib
+import base64
+import binascii
 import html
 import hmac
 import json
@@ -185,7 +187,7 @@ async def _signed_in_user(request: Request):
         return None
     return await _first(_env(request).DB.prepare(
         "SELECT u.id,u.name,u.email,u.role,u.manager_id,u.job_title,u.designation_id,u.avatar_data "
-        "FROM sessions s JOIN users u ON u.id=s.user_id "
+        "FROM sessions s JOIN users u ON u.id=COALESCE(s.act_as_user_id,s.user_id) "
         "WHERE s.token_hash=? AND s.expires_at>? AND u.is_active=1"
     ).bind(hashlib.sha256(cookie.encode()).hexdigest(), int(time.time())))
 
@@ -228,10 +230,11 @@ async def auth_session(request: Request):
         return {"setup_required": count["n"] == 0, "user": None, "csrf": None,
                 "workspace_preview": False, "owner_name": None}
     session = await _first(db.prepare(
-        "SELECT s.csrf,s.expires_at,u.id,u.name,u.email,u.role,u.manager_id,u.job_title,"
+        "SELECT s.csrf,s.expires_at,s.act_as_user_id,owner.name owner_name,u.id,u.name,u.email,u.role,u.manager_id,u.job_title,"
         "u.designation_id,u.avatar_data,d.name designation,d.permissions_json,d.data_permissions_json "
-        "FROM sessions s JOIN users u ON u.id=s.user_id LEFT JOIN designations d ON d.id=u.designation_id "
-        "WHERE s.token_hash=? AND s.expires_at>? AND u.is_active=1"
+        "FROM sessions s JOIN users owner ON owner.id=s.user_id "
+        "JOIN users u ON u.id=COALESCE(s.act_as_user_id,s.user_id) LEFT JOIN designations d ON d.id=u.designation_id "
+        "WHERE s.token_hash=? AND s.expires_at>? AND owner.is_active=1 AND u.is_active=1"
     ).bind(hashlib.sha256(cookie.encode()).hexdigest(), int(time.time())))
     if not session:
         return {"setup_required": count["n"] == 0, "user": None, "csrf": None,
@@ -247,7 +250,8 @@ async def auth_session(request: Request):
             "permissions": permissions,
             "data_permissions": data_permissions,
             "avatar_data": session["avatar_data"] or ""}, "csrf": session["csrf"],
-            "workspace_preview": False, "owner_name": None}
+            "workspace_preview": bool(session["act_as_user_id"]),
+            "owner_name": session["owner_name"] if session["act_as_user_id"] else None}
 
 
 @app.get("/api/products")
@@ -454,8 +458,16 @@ async def orders(request: Request):
                 "unit_price": _money(item["unit_price_minor"]), "discount": _money(item["discount_minor"]),
                 "order_value": _money(expected_part), "received": _money(received_part),
                 "pending": _money(max(0, expected_part - received_part))})
+        manager_can_manage = False
+        if user["role"] == "manager" and order["employee_id"] is not None:
+            team_access = await _first(db.prepare(
+                "WITH RECURSIVE team(id) AS (SELECT id FROM users WHERE manager_id=? AND is_active=1 "
+                "UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) "
+                "SELECT EXISTS(SELECT 1 FROM team WHERE id=?) member"
+            ).bind(user["id"], order["employee_id"]))
+            manager_can_manage = bool(team_access and team_access["member"])
         base = {"id": order["id"], "customer_id": order["customer_id"], "employee_id": order["employee_id"],
-                "can_manage": user["role"] == "owner" or (user["role"] == "manager" and order["employee_id"] == user["id"]) or (user["role"] == "employee" and order["employee_id"] == user["id"]),
+                "can_manage": user["role"] == "owner" or manager_can_manage or (user["role"] == "employee" and order["employee_id"] == user["id"]),
                 "order_no": order["order_no"], "date": order["order_date"],
                 "course_start_date": order["course_start_date"], "enrollment_status": order["enrollment_status"],
                 "customer": order["customer_name"], "employee": order["employee_name"] or "Unassigned",
@@ -468,6 +480,34 @@ async def orders(request: Request):
             base["pending"] = _money(max(0, total - received))
         result.append(base)
     return result
+
+
+@app.get("/api/customers/{customer_id}")
+async def customer_profile(customer_id: int, request: Request):
+    user, error = await _require_user(request, ("owner", "manager", "employee"))
+    if error:
+        return error
+    db = _env(request).DB
+    customer = await _first(db.prepare("SELECT id,name,phone,email,created_at FROM customers WHERE id=?").bind(customer_id))
+    if not customer:
+        return JSONResponse({"error": "Student not found"}, status_code=404)
+    customer_orders = [row for row in await orders(request) if int(row["customer_id"]) == customer_id]
+    if not customer_orders:
+        return JSONResponse({"error": "Student not found in your workspace"}, status_code=404)
+    order_ids = {int(row["id"]) for row in customer_orders}
+    installment_rows = [row for row in await installments(request) if row["order_no"] in {o["order_no"] for o in customer_orders}]
+    payment_rows = [row for row in await payments(request) if int(row["order_id"]) in order_ids]
+    if user["role"] == "employee":
+        batch_rows = await db.prepare(
+            "SELECT DISTINCT b.id,b.name,b.product_id,b.status FROM batches b JOIN order_items oi ON oi.batch_id=b.id "
+            "JOIN orders o ON o.id=oi.order_id WHERE o.employee_id=? AND o.customer_id=? ORDER BY b.name"
+        ).bind(user["id"], customer_id).all()
+    else:
+        batch_rows = await db.prepare("SELECT id,name,product_id,status FROM batches ORDER BY name").all()
+    return {"student": {"id": customer["id"], "name": customer["name"], "phone": customer["phone"] or "",
+                         "email": customer["email"] or "", "created_at": customer["created_at"]},
+            "orders": customer_orders, "installments": installment_rows, "payments": payment_rows,
+            "batches": [{"id": row["id"], "name": row["name"], "product_id": row["product_id"], "status": row["status"]} for row in _rows(batch_rows)]}
 
 
 @app.post("/api/orders")
@@ -997,7 +1037,961 @@ async def update_team_profile(request: Request):
 @app.post("/api/team/update")
 async def update_team_reporting(request: Request):
     user, error = await _require_user(request, ("owner", "manager"))
-    if erro…17289 tokens truncated…one)
+    if error:
+        return error
+    try:
+        data = await request.json()
+        user_id = int(data.get("user_id", 0))
+        manager_id = int(data["manager_id"]) if data.get("manager_id") else None
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "Choose a valid team member and manager"}, status_code=400)
+    db = _env(request).DB
+    person = await _first(db.prepare("SELECT id,role,manager_id FROM users WHERE id=? AND role IN ('manager','employee')").bind(user_id))
+    if not person:
+        return JSONResponse({"error": "Team member not found"}, status_code=404)
+    if user["role"] == "manager" and (person["role"] != "employee" or person["manager_id"] != user["id"]):
+        return JSONResponse({"error": "You can change reporting only for your direct employees"}, status_code=403)
+    if manager_id == user_id:
+        return JSONResponse({"error": "A manager cannot report to themselves"}, status_code=400)
+    if manager_id:
+        manager = await _first(db.prepare("SELECT id FROM users WHERE id=? AND role='manager' AND is_active=1").bind(manager_id))
+        if not manager:
+            return JSONResponse({"error": "Choose an active manager"}, status_code=400)
+        cycle = await _first(db.prepare(
+            "WITH RECURSIVE team(id) AS (SELECT id FROM users WHERE manager_id=? "
+            "UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id) "
+            "SELECT EXISTS(SELECT 1 FROM team WHERE id=?) member"
+        ).bind(user_id, manager_id))
+        if cycle["member"]:
+            return JSONResponse({"error": "That reporting change would create a loop"}, status_code=400)
+    await db.prepare("UPDATE users SET manager_id=? WHERE id=?").bind(manager_id, user_id).run()
+    await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'changed_reporting_line','user',?)").bind(user["id"], user_id).run()
+    return {"ok": True}
+
+
+@app.post("/api/team/status")
+async def update_team_status(request: Request):
+    user, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        user_id = int(data.get("user_id", 0))
+        active = _boolean(data.get("active"))
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "Choose a valid team member"}, status_code=400)
+    db = _env(request).DB
+    person = await _first(db.prepare("SELECT id,role,is_active,manager_id FROM users WHERE id=? AND role IN ('manager','employee')").bind(user_id))
+    if not person:
+        return JSONResponse({"error": "Team member not found"}, status_code=404)
+    if user["role"] == "manager" and (person["role"] != "employee" or person["manager_id"] != user["id"]):
+        return JSONResponse({"error": "You can manage access only for your direct employees"}, status_code=403)
+    if not active and person["role"] == "manager":
+        direct = await _first(db.prepare("SELECT COUNT(*) count FROM users WHERE manager_id=?").bind(user_id))
+        if int(direct["count"] or 0):
+            return JSONResponse({"error": "Reassign this manager’s direct reports before removing them"}, status_code=409)
+    await db.prepare("UPDATE users SET is_active=? WHERE id=?").bind(int(active), user_id).run()
+    if not active:
+        await db.prepare("DELETE FROM sessions WHERE user_id=?").bind(user_id).run()
+    await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,?, 'team_member',?)").bind(
+        user["id"], "activated" if active else "deactivated", user_id).run()
+    return {"ok": True, "active": active}
+
+
+@app.post("/api/team/reset-password")
+async def reset_team_password(request: Request):
+    user, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        user_id = int(data.get("user_id", 0))
+        password_hash = _hash_password(str(data.get("password", "")))
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Choose a valid team member and password"}, status_code=400)
+    db = _env(request).DB
+    person = await _first(db.prepare("SELECT id,manager_id FROM users WHERE id=? AND role IN ('manager','employee')").bind(user_id))
+    if not person:
+        return JSONResponse({"error": "Team member not found"}, status_code=404)
+    if user["role"] == "manager" and person["manager_id"] != user["id"]:
+        return JSONResponse({"error": "You can reset access only for your direct employees"}, status_code=403)
+    await db.prepare("UPDATE users SET password_hash=? WHERE id=?").bind(password_hash, user_id).run()
+    await db.prepare("DELETE FROM sessions WHERE user_id=?").bind(user_id).run()
+    await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'reset','team_member_password',?)").bind(user["id"], user_id).run()
+    return {"ok": True}
+
+
+@app.get("/api/team/messages")
+async def team_messages(request: Request):
+    user, error = await _require_user(request, ("owner", "manager", "employee"))
+    if error:
+        return error
+    rows = await _env(request).DB.prepare(
+        "SELECT m.*,s.name sender_name,s.role sender_role,r.name recipient_name FROM team_messages m "
+        "JOIN users s ON s.id=m.sender_id JOIN users r ON r.id=m.recipient_id "
+        "WHERE m.recipient_id=? OR m.sender_id=? ORDER BY COALESCE(m.remind_at,m.created_at) DESC,m.id DESC LIMIT 200"
+    ).bind(user["id"], user["id"]).all()
+    return [{"id": r["id"], "title": r["title"], "body": r["body"], "sender_id": r["sender_id"],
+        "sender": r["sender_name"], "sender_role": r["sender_role"], "recipient_id": r["recipient_id"],
+        "recipient": r["recipient_name"], "remind_at": r["remind_at"], "read": bool(r["read_at"]),
+        "completed": bool(r["completed_at"]), "created_at": r["created_at"],
+        "direction": "inbox" if r["recipient_id"] == user["id"] else "sent"} for r in _rows(rows)]
+
+
+def _designation_json(row):
+    permissions = [key for key in _json_list(row["permissions_json"]) if key in ACCESS_FEATURES]
+    data_permissions = [key for key in _json_list(row["data_permissions_json"]) if key in DATA_ACCESS_OPTIONS]
+    return {"id": row["id"], "name": row["name"], "role_class": row["role_class"],
+            "permissions": permissions, "data_permissions": data_permissions, "system": bool(row["is_system"])}
+
+
+@app.get("/api/team/designations")
+async def designations(request: Request):
+    _, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    rows = await _env(request).DB.prepare("SELECT * FROM designations ORDER BY is_system DESC,name COLLATE NOCASE").all()
+    return {"features": [{"key": key, "label": label} for key, label in ACCESS_FEATURES.items()],
+            "data_options": [{"key": key, "label": label, "group": DATA_ACCESS_GROUPS[key]} for key, label in DATA_ACCESS_OPTIONS.items()],
+            "designations": [_designation_json(row) for row in _rows(rows)]}
+
+
+@app.post("/api/team/designations")
+async def save_designation(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        designation_id = int(data.get("id") or 0)
+        name = str(data.get("name", "")).strip()[:80]
+        role_class = str(data.get("role_class", "employee"))
+        raw_permissions, raw_data = data.get("permissions", []), data.get("data_permissions", [])
+        if not name or role_class not in ("manager", "employee") or not isinstance(raw_permissions, list) or not isinstance(raw_data, list):
+            raise ValueError("Enter a designation, access class and feature choices")
+        permitted_features = set(ACCESS_FEATURES)
+        permitted_features.discard("team" if role_class == "employee" else "my-students")
+        permissions = sorted({str(key) for key in raw_permissions if str(key) in permitted_features})
+        data_permissions = sorted({str(key) for key in raw_data if str(key) in DATA_ACCESS_OPTIONS})
+        if not permissions:
+            raise ValueError("Enable at least one workspace feature")
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Check designation permissions"}, status_code=400)
+    db = _env(request).DB
+    try:
+        if designation_id:
+            existing = await _first(db.prepare("SELECT id,name,role_class,is_system FROM designations WHERE id=?").bind(designation_id))
+            if not existing:
+                return JSONResponse({"error": "Designation not found"}, status_code=404)
+            if existing["is_system"] and (name != existing["name"] or role_class != existing["role_class"]):
+                return JSONResponse({"error": "Built-in access classes keep their system name and reporting class"}, status_code=400)
+            if existing["role_class"] == "manager" and role_class == "employee":
+                reports = await _first(db.prepare("SELECT COUNT(*) count FROM users WHERE designation_id=? AND EXISTS(SELECT 1 FROM users direct WHERE direct.manager_id=users.id)").bind(designation_id))
+                if int(reports["count"] or 0):
+                    return JSONResponse({"error": "Reassign the direct reports of these managers before changing this designation"}, status_code=409)
+            await db.prepare("UPDATE designations SET name=?,role_class=?,permissions_json=?,data_permissions_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(
+                name, role_class, json.dumps(permissions), json.dumps(data_permissions), designation_id).run()
+            if existing["role_class"] != role_class:
+                await db.prepare("UPDATE users SET role=? WHERE designation_id=?").bind(role_class, designation_id).run()
+            action = "updated"
+        else:
+            result = await _first(db.prepare("INSERT INTO designations(name,role_class,permissions_json,data_permissions_json) VALUES(?,?,?,?) RETURNING *").bind(
+                name, role_class, json.dumps(permissions), json.dumps(data_permissions)))
+            designation_id = result["id"]
+            action = "created"
+        saved = await _first(db.prepare("SELECT * FROM designations WHERE id=?").bind(designation_id))
+        await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,?, 'designation',?)").bind(user["id"], action, designation_id).run()
+    except Exception:
+        return JSONResponse({"error": "Designation could not be saved. Check that its name is unique."}, status_code=409)
+    return JSONResponse(_designation_json(saved), status_code=200 if data.get("id") else 201)
+
+
+@app.post("/api/team/designations/delete")
+async def delete_designation(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        designation_id = int(data.get("id", 0))
+        if data.get("confirmed") is not True:
+            raise ValueError("Confirm the designation deletion")
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Choose a designation"}, status_code=400)
+    db = _env(request).DB
+    designation = await _first(db.prepare("SELECT id,is_system FROM designations WHERE id=?").bind(designation_id))
+    if not designation:
+        return JSONResponse({"error": "Designation not found"}, status_code=404)
+    if designation["is_system"]:
+        return JSONResponse({"error": "Built-in designations cannot be removed"}, status_code=409)
+    assigned = await _first(db.prepare("SELECT COUNT(*) count FROM users WHERE designation_id=?").bind(designation_id))
+    if int(assigned["count"] or 0):
+        return JSONResponse({"error": "Reassign every account using this designation before removing it"}, status_code=409)
+    await db.prepare("DELETE FROM designations WHERE id=?").bind(designation_id).run()
+    await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'deleted','designation',?)").bind(user["id"], designation_id).run()
+    return {"ok": True}
+
+
+@app.get("/api/team/message-recipients")
+async def team_message_recipients(request: Request):
+    user, error = await _require_user(request, ("owner", "manager", "employee"))
+    if error:
+        return error
+    db = _env(request).DB
+    if user["role"] == "owner":
+        rows = await db.prepare("SELECT id,name,email,role FROM users WHERE role!='owner' AND is_active=1 ORDER BY name").all()
+    elif user["role"] == "manager":
+        rows = await db.prepare(
+            "WITH RECURSIVE team(id) AS (SELECT id FROM users WHERE manager_id=? AND is_active=1 "
+            "UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) "
+            "SELECT id,name,email,role FROM users WHERE id IN (SELECT id FROM team) OR role='owner' AND is_active=1 ORDER BY role,name"
+        ).bind(user["id"]).all()
+    else:
+        rows = await db.prepare(
+            "SELECT id,name,email,role FROM users WHERE is_active=1 AND (role='owner' OR (role='manager' AND id=?)) ORDER BY role,name"
+        ).bind(user["manager_id"]).all()
+    return _rows(rows)
+
+
+@app.post("/api/team/messages")
+async def send_team_message(request: Request):
+    user, error = await _require_user(request, ("owner", "manager", "employee"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        recipient_id = int(data.get("recipient_id", 0))
+        title = str(data.get("title", "")).strip()[:120]
+        body = str(data.get("body", "")).strip()[:2000]
+        remind_at = str(data.get("remind_at", "")).strip() or None
+        if not title or not body:
+            raise ValueError("Add a short title and message")
+        if remind_at:
+            from datetime import datetime
+            remind_at = datetime.fromisoformat(remind_at).strftime("%Y-%m-%dT%H:%M")
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Check the message details"}, status_code=400)
+    db = _env(request).DB
+    person = await _first(db.prepare("SELECT id,name,email,role,manager_id FROM users WHERE id=? AND is_active=1").bind(recipient_id))
+    if not person:
+        return JSONResponse({"error": "Choose an active recipient"}, status_code=404)
+    allowed = user["role"] == "owner" and person["role"] != "owner"
+    if user["role"] == "manager":
+        scope = await _first(db.prepare(
+            "WITH RECURSIVE team(id) AS (SELECT id FROM users WHERE manager_id=? AND is_active=1 "
+            "UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) "
+            "SELECT EXISTS(SELECT 1 FROM team WHERE id=?) member"
+        ).bind(user["id"], recipient_id))
+        allowed = person["role"] == "owner" or bool(scope["member"])
+    elif user["role"] == "employee":
+        allowed = person["role"] == "owner" or (person["role"] == "manager" and person["id"] == user.get("manager_id"))
+    if not allowed:
+        return JSONResponse({"error": "You cannot message this team member"}, status_code=403)
+    created = await _first(db.prepare(
+        "INSERT INTO team_messages(sender_id,recipient_id,title,body,remind_at) VALUES(?,?,?,?,?) RETURNING id"
+    ).bind(user["id"], recipient_id, title, body, remind_at))
+    await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'sent_team_reminder','team_message',?)").bind(user["id"], created["id"]).run()
+    return JSONResponse({"id": created["id"]}, status_code=201)
+
+
+@app.post("/api/team/messages/complete")
+async def complete_team_message(request: Request):
+    user, error = await _require_user(request, ("owner", "manager", "employee"))
+    if error:
+        return error
+    try:
+        message_id = int((await request.json()).get("id", 0))
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "Choose a message"}, status_code=400)
+    db = _env(request).DB
+    message = await _first(db.prepare("SELECT id,sender_id,recipient_id FROM team_messages WHERE id=?").bind(message_id))
+    if not message:
+        return JSONResponse({"error": "Message not found"}, status_code=404)
+    if user["role"] != "owner" and user["id"] not in (message["sender_id"], message["recipient_id"]):
+        return JSONResponse({"error": "You cannot update this message"}, status_code=403)
+    if user["role"] != "owner" and user["id"] != message["recipient_id"]:
+        return JSONResponse({"error": "Only the recipient can complete a message"}, status_code=403)
+    await db.prepare("UPDATE team_messages SET read_at=COALESCE(read_at,CURRENT_TIMESTAMP),completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP) WHERE id=?").bind(message_id).run()
+    await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'completed_team_reminder','team_message',?)").bind(user["id"], message_id).run()
+    return {"ok": True}
+
+
+@app.get("/api/expenses")
+async def expenses(request: Request):
+    _, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    rows = await _env(request).DB.prepare("SELECT id,spent_on,category,description,amount_minor,method,recurring FROM expenses ORDER BY spent_on DESC,id DESC").all()
+    return [{"id": r["id"], "date": r["spent_on"], "category": r["category"], "description": r["description"],
+             "amount": _money(r["amount_minor"]), "method": r["method"], "recurring": bool(r["recurring"])} for r in _rows(rows)]
+
+
+@app.post("/api/expenses")
+async def create_expense(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        spent_on = date.fromisoformat(str(data.get("spent_on") or date.today().isoformat()))
+        category = str(data.get("category", "Miscellaneous")).strip()[:80]
+        description = str(data.get("description", "")).strip()[:240]
+        amount = _minor(data.get("amount"))
+        if not description:
+            raise ValueError("Add an expense description")
+        if spent_on > date.today():
+            raise ValueError("Expense date cannot be in the future")
+    except (ValueError, TypeError, InvalidOperation) as exc:
+        return JSONResponse({"error": str(exc) or "Check the expense details"}, status_code=400)
+    db = _env(request).DB
+    saved = await _first(db.prepare(
+        "INSERT INTO expenses(spent_on,category,description,amount_minor,method,recurring,notes,created_by) "
+        "VALUES(?,?,?,?,?,?,?,?) RETURNING id"
+    ).bind(spent_on.isoformat(), category, description, amount, str(data.get("method", ""))[:60],
+        int(bool(data.get("recurring"))), str(data.get("notes", ""))[:500], user["id"]))
+    await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'created','expense',?)").bind(user["id"], saved["id"]).run()
+    return JSONResponse({"id": saved["id"]}, status_code=201)
+
+
+@app.post("/api/expenses/delete")
+async def delete_expense(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        expense_id = int(data.get("id", 0))
+        if data.get("confirmed") is not True:
+            raise ValueError("Confirm the expense deletion")
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Choose an expense"}, status_code=400)
+    db = _env(request).DB
+    expense = await _first(db.prepare("SELECT id FROM expenses WHERE id=?").bind(expense_id))
+    if not expense:
+        return JSONResponse({"error": "Expense not found"}, status_code=404)
+    await db.prepare("DELETE FROM expenses WHERE id=?").bind(expense_id).run()
+    await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'deleted','expense',?)").bind(user["id"], expense_id).run()
+    return {"ok": True}
+
+
+@app.get("/api/settings")
+async def settings(request: Request):
+    _, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    rows = await _env(request).DB.prepare("SELECT key,value FROM settings").all()
+    result = dict(BUSINESS_SETTING_DEFAULTS)
+    allowed = set(BUSINESS_SETTING_DEFAULTS) | {"invoice_logo_data", "invoice_logo_customized", "next_invoice_number"}
+    result.update({r["key"]: r["value"] for r in _rows(rows) if r["key"] in allowed})
+    return result
+
+
+@app.post("/api/settings")
+async def update_business_settings(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        values = {key: str(value).strip()[:500] for key, value in data.items() if key in BUSINESS_SETTING_DEFAULTS and key != "followup_reminder_lead_days"}
+        for key, value in values.items():
+            if key == "business_name" and (not value or len(value) > 120):
+                raise ValueError("Business name must be 1–120 characters")
+            if key == "business_email" and value and ("@" not in value or any(ch.isspace() for ch in value)):
+                raise ValueError("Enter a valid business email")
+            if key == "business_website" and value and (" " in value or "." not in value):
+                raise ValueError("Enter a valid website address")
+            if key == "invoice_prefix" and (not value or len(value) > 12 or not value.replace("-", "").isalnum()):
+                raise ValueError("Invoice prefix may use letters, numbers and hyphens (up to 12 characters)")
+            if key == "currency" and (len(value) != 3 or not value.isalpha()):
+                raise ValueError("Currency must be a three-letter code")
+            if key == "invoice_template_style" and value not in ("studio", "classic"):
+                raise ValueError("Choose Studio or Classic invoice style")
+            if key == "invoice_accent_color" and (len(value) != 7 or not value.startswith("#") or any(ch not in "0123456789abcdefABCDEF" for ch in value[1:])):
+                raise ValueError("Choose a valid six-digit accent colour")
+            if key in ("invoice_show_phone", "invoice_show_email", "invoice_show_website", "invoice_show_tax_id", "invoice_auto_installment_enabled"):
+                values[key] = "1" if _boolean(value) else "0"
+            if key == "invoice_auto_lead_days":
+                days = int(value)
+                if days < 0 or days > 365:
+                    raise ValueError("Invoice lead time must be from zero to 365 days")
+            if key in ("invoice_location",):
+                values[key] = value[:100]
+            if key == "invoice_footer_text":
+                values[key] = value[:240]
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Check the business settings"}, status_code=400)
+    db = _env(request).DB
+    statements = [db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(key, value) for key, value in values.items()]
+    statements.append(db.prepare("INSERT INTO audit_log(actor_id,action,entity) VALUES(?,'updated','business_settings')").bind(user["id"]))
+    try:
+        await db.batch(statements)
+    except Exception:
+        return JSONResponse({"error": "Settings were not saved; retry the update"}, status_code=409)
+    return {"ok": True}
+
+
+def _invoice_template(settings_map):
+    style = settings_map.get("invoice_template_style", "studio")
+    if style not in ("studio", "classic"):
+        style = "studio"
+    color = settings_map.get("invoice_accent_color", "#e51b2b")
+    if len(color) != 7 or not color.startswith("#") or any(ch not in "0123456789abcdefABCDEF" for ch in color[1:]):
+        color = "#e51b2b"
+    return {"style": style, "accent_color": color, "location": settings_map.get("invoice_location", "")[:100],
+            "footer_text": settings_map.get("invoice_footer_text", BUSINESS_SETTING_DEFAULTS["invoice_footer_text"])[:240],
+            "show_phone": settings_map.get("invoice_show_phone", "1") == "1",
+            "show_email": settings_map.get("invoice_show_email", "1") == "1",
+            "show_website": settings_map.get("invoice_show_website", "1") == "1",
+            "show_tax_id": settings_map.get("invoice_show_tax_id", "0") == "1"}
+
+
+@app.get("/api/invoice/template")
+async def invoice_template(request: Request):
+    _, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    rows = await _env(request).DB.prepare("SELECT key,value FROM settings WHERE key LIKE 'invoice_%'").all()
+    settings_map = dict(BUSINESS_SETTING_DEFAULTS)
+    settings_map.update({r["key"]: r["value"] for r in _rows(rows)})
+    return _invoice_template(settings_map)
+
+
+@app.post("/api/invoice/template")
+async def update_invoice_template(request: Request):
+    user, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        values = {}
+        allowed = {"invoice_template_style", "invoice_accent_color", "invoice_location", "invoice_footer_text", "invoice_show_phone", "invoice_show_email", "invoice_show_website", "invoice_show_tax_id"}
+        for key, raw in data.items():
+            if key not in allowed:
+                continue
+            value = str(raw).strip()[:500]
+            if key == "invoice_template_style" and value not in ("studio", "classic"):
+                raise ValueError("Choose Studio or Classic invoice style")
+            if key == "invoice_accent_color" and (len(value) != 7 or not value.startswith("#") or any(ch not in "0123456789abcdefABCDEF" for ch in value[1:])):
+                raise ValueError("Choose a valid six-digit accent colour")
+            if key == "invoice_location":
+                value = value[:100]
+            if key == "invoice_footer_text":
+                value = value[:240]
+            if key in ("invoice_show_phone", "invoice_show_email", "invoice_show_website", "invoice_show_tax_id"):
+                value = "1" if _boolean(raw) else "0"
+            values[key] = value
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Check the invoice template"}, status_code=400)
+    db = _env(request).DB
+    statements = [db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(key, value) for key, value in values.items()]
+    statements.append(db.prepare("INSERT INTO audit_log(actor_id,action,entity) VALUES(?,'updated','invoice_template')").bind(user["id"]))
+    try:
+        await db.batch(statements)
+    except Exception:
+        return JSONResponse({"error": "Invoice template was not saved; retry the update"}, status_code=409)
+    rows = await db.prepare("SELECT key,value FROM settings WHERE key LIKE 'invoice_%'").all()
+    settings_map = dict(BUSINESS_SETTING_DEFAULTS)
+    settings_map.update({r["key"]: r["value"] for r in _rows(rows)})
+    return {"ok": True, "template": _invoice_template(settings_map)}
+
+
+async def _reminder_stages(db):
+    raw = await _setting(db, "emi_reminder_stages", "")
+    try:
+        data = json.loads(raw) if raw else {}
+        stages = data.get("stages", REMINDER_STAGE_DEFAULTS)
+        normalized = [{"offset_days": int(item["offset_days"]), "label": str(item.get("label", "Reminder"))[:60],
+                       "subject": str(item.get("subject", "Payment reminder · {order_no}"))[:180],
+                       "body": str(item.get("body", "Please review your scheduled payment."))[:2000]} for item in stages]
+        repeat_days, repeat_after = int(data.get("repeat_days", 0)), int(data.get("repeat_after", 10))
+        if not normalized or len(normalized) > 20 or any(not -365 <= x["offset_days"] <= 3650 for x in normalized):
+            raise ValueError
+        if len({x["offset_days"] for x in normalized}) != len(normalized) or not 0 <= repeat_days <= 365 or not 1 <= repeat_after <= 3650:
+            raise ValueError
+        return {"stages": sorted(normalized, key=lambda x: x["offset_days"]), "repeat_days": repeat_days, "repeat_after": repeat_after}
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return {"stages": REMINDER_STAGE_DEFAULTS, "repeat_days": 0, "repeat_after": 10}
+
+
+async def _reminder_types(db):
+    raw = await _setting(db, "emi_reminder_types", "")
+    try:
+        values = json.loads(raw) if raw else list(REMINDER_INSTALLMENT_TYPES)
+        selected = list(dict.fromkeys(str(value) for value in values if str(value) in REMINDER_INSTALLMENT_TYPES))
+        return selected or list(REMINDER_INSTALLMENT_TYPES)
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return list(REMINDER_INSTALLMENT_TYPES)
+
+
+@app.get("/api/followup/settings")
+async def followup_settings(request: Request):
+    _, error = await _require_user(request, ("owner", "manager", "employee"))
+    if error:
+        return error
+    db = _env(request).DB
+    verified = False  # No outbound email sender is configured in this Worker yet.
+    channels = {name: await _setting(db, "email_" + name + "_enabled", "0") == "1" for name in ("payment", "invoice", "followup", "team")}
+    try:
+        lead_days = int(await _setting(db, "followup_reminder_lead_days", "5"))
+    except ValueError:
+        lead_days = 5
+    return {"reminder_lead_days": lead_days, "sender_connected": verified, "sender_status": "not_connected",
+        "email_channels": channels, "email_automation_enabled": False,
+        "email_reminder_time": await _setting(db, "email_reminder_time", "09:00")}
+
+
+@app.get("/api/settings/reminders")
+async def reminder_settings(request: Request):
+    user, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    db = _env(request).DB
+    count_rows = await db.prepare("SELECT status,COUNT(*) n FROM email_outbox GROUP BY status").all()
+    recent_rows = await db.prepare("SELECT id,category,recipient,subject,scheduled_at,status,attempts,last_error,sent_at FROM email_outbox ORDER BY id DESC LIMIT 30").all() if user["role"] == "owner" else await db.prepare(
+        "SELECT e.id,e.category,e.recipient,e.subject,e.scheduled_at,e.status,e.attempts,e.last_error,e.sent_at FROM email_outbox e "
+        "WHERE e.installment_id IN (SELECT i.id FROM installments i JOIN orders o ON o.id=i.order_id WHERE o.employee_id IN (WITH RECURSIVE team(id) AS (SELECT ? UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) SELECT id FROM team)) "
+        "OR (e.dedupe_key LIKE 'invoice-send:%' AND CAST(substr(e.dedupe_key,14,instr(substr(e.dedupe_key,14),':')-1) AS INTEGER) IN "
+        "(SELECT i.id FROM invoices i JOIN orders o ON o.id=i.order_id WHERE o.employee_id IN (WITH RECURSIVE team(id) AS (SELECT ? UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) SELECT id FROM team))) "
+        "ORDER BY e.id DESC LIMIT 30"
+    ).bind(user["id"], user["id"]).all()
+    counts = {row["status"]: int(row["n"]) for row in _rows(count_rows)}
+    recent = []
+    for row in _rows(recent_rows):
+        local, _, domain = str(row["recipient"] or "").partition("@")
+        recent.append({"id": row["id"], "category": row["category"], "recipient": local[:1] + "•••@" + domain if domain else "Invalid address",
+            "subject": row["subject"], "scheduled_at": row["scheduled_at"], "status": row["status"], "attempts": row["attempts"],
+            "last_error": row["last_error"], "sent_at": row["sent_at"]})
+    channels = {f"email_{name}_enabled": await _setting(db, f"email_{name}_enabled", "0") == "1" for name in ("payment", "invoice", "followup", "team")}
+    try:
+        lead_days = int(await _setting(db, "invoice_auto_lead_days", "5"))
+    except ValueError:
+        lead_days = 5
+    return {"enabled": any(channels.values()), "channels": channels, "emi_types": await _reminder_types(db),
+        "send_time": await _setting(db, "email_reminder_time", "09:00"), "sender_verified": False,
+        "daily_limit": 20, "counts": counts, "recent": recent, "emi_plan": await _reminder_stages(db),
+        "invoice_auto_enabled": await _setting(db, "invoice_auto_installment_enabled", "1") == "1",
+        "invoice_auto_lead_days": lead_days}
+
+
+@app.post("/api/settings/reminders")
+async def update_reminder_settings(request: Request):
+    user, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        db = _env(request).DB
+        flags = {key: "1" if _boolean(data.get(key)) else "0" for key in ("email_payment_enabled", "email_invoice_enabled", "email_followup_enabled", "email_team_enabled")}
+        if any(value == "1" for value in flags.values()):
+            raise ValueError("Email delivery is not connected yet; save the reminder plan with email channels switched off")
+        send_time = str(data.get("send_time", "09:00")).strip()
+        if len(send_time) != 5 or send_time[2] != ":" or not send_time[:2].isdigit() or not send_time[3:].isdigit() or int(send_time[:2]) > 23 or int(send_time[3:]) > 59:
+            raise ValueError("Choose a valid daily send time")
+        types = data.get("emi_types")
+        types_json = None
+        if types is not None:
+            if not isinstance(types, list):
+                raise ValueError("Choose which payment types can receive reminders")
+            selected = list(dict.fromkeys(str(x) for x in types))
+            if not selected or any(x not in REMINDER_INSTALLMENT_TYPES for x in selected):
+                raise ValueError("Select at least one valid payment type")
+            types_json = json.dumps(selected)
+        auto_enabled = data.get("invoice_auto_enabled")
+        if auto_enabled is not None and not isinstance(auto_enabled, bool):
+            raise ValueError("Choose whether installment invoice drafts should be created automatically")
+        lead_days = data.get("invoice_auto_lead_days")
+        if lead_days is not None:
+            lead_days = int(lead_days)
+            if not 1 <= lead_days <= 90:
+                raise ValueError("Invoice draft lead time must be between 1 and 90 days")
+        plan_json = None
+        plan = data.get("emi_plan")
+        if plan is not None:
+            stages = plan.get("stages") if isinstance(plan, dict) else None
+            if not isinstance(stages, list) or not 1 <= len(stages) <= 20:
+                raise ValueError("Add between 1 and 20 reminder stages")
+            normalized, offsets = [], set()
+            for stage in stages:
+                offset = int(stage.get("offset_days"))
+                label, subject, body = str(stage.get("label", "")).strip()[:60], str(stage.get("subject", "")).strip()[:180], str(stage.get("body", "")).strip()[:2000]
+                if not -365 <= offset <= 3650 or offset in offsets or not label or not subject or not body:
+                    raise ValueError("Each reminder stage needs a unique valid day offset, name, subject and message")
+                offsets.add(offset)
+                normalized.append({"offset_days": offset, "label": label, "subject": subject, "body": body})
+            repeat_days, repeat_after = int(plan.get("repeat_days", 0)), int(plan.get("repeat_after", 10))
+            if not 0 <= repeat_days <= 365 or not 1 <= repeat_after <= 3650 or (repeat_days and not any(x["offset_days"] > 0 for x in normalized)):
+                raise ValueError("Check the overdue reminder repeat settings")
+            plan_json = json.dumps({"stages": sorted(normalized, key=lambda x: x["offset_days"]), "repeat_days": repeat_days, "repeat_after": repeat_after})
+    except (ValueError, TypeError, AttributeError) as exc:
+        return JSONResponse({"error": str(exc) or "Check the reminder settings"}, status_code=400)
+    statements = [db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(key, value) for key, value in flags.items()]
+    statements.append(db.prepare("INSERT INTO settings(key,value) VALUES('email_reminder_time',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(send_time))
+    if auto_enabled is not None:
+        statements.append(db.prepare("INSERT INTO settings(key,value) VALUES('invoice_auto_installment_enabled',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind("1" if auto_enabled else "0"))
+    if lead_days is not None:
+        statements.append(db.prepare("INSERT INTO settings(key,value) VALUES('invoice_auto_lead_days',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(str(lead_days)))
+    if plan_json is not None:
+        statements.append(db.prepare("INSERT INTO settings(key,value) VALUES('emi_reminder_stages',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(plan_json))
+    if types_json is not None:
+        statements.append(db.prepare("INSERT INTO settings(key,value) VALUES('emi_reminder_types',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(types_json))
+    statements.append(db.prepare("INSERT INTO audit_log(actor_id,action,entity) VALUES(?,'updated','reminder_email_rules')").bind(user["id"]))
+    try:
+        aw…2449 tokens truncated…nd 3,650")
+    except (ValueError, TypeError, InvalidOperation) as exc:
+        return JSONResponse({"error": str(exc) or "Check the incentive settings"}, status_code=400)
+    values = [("incentive_pool_rate", str(pool)), ("incentive_rep_rate", str(rep)),
+              ("incentive_manager_rate", str(manager)), ("incentive_payout_due_days", str(days))]
+    statements = [db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(k, v) for k, v in values]
+    statements.append(db.prepare("INSERT INTO audit_log(actor_id,action,entity) VALUES(?,'updated','incentive_rules')").bind(user["id"]))
+    try:
+        await db.batch(statements)
+    except Exception:
+        return JSONResponse({"error": "Incentive settings were not saved; retry the update"}, status_code=409)
+    return {"ok": True, "pool_rate": float(pool), "rep_rate": float(rep), "manager_rate": float(manager), "payout_due_days": days}
+
+
+@app.get("/api/incentive/team-rules")
+async def incentive_team_rules(request: Request):
+    user, error = await _require_user(request, ("manager",))
+    if error:
+        return error
+    db = _env(request).DB
+    defaults = await incentive_settings(request)
+    if isinstance(defaults, JSONResponse):
+        return defaults
+    rows = await db.prepare(
+        "SELECT u.id,u.name,r.rep_rate,r.manager_rate FROM users u LEFT JOIN manager_incentive_rules r "
+        "ON r.employee_id=u.id AND r.manager_id=? WHERE u.manager_id=? AND u.role='employee' AND u.is_active=1 ORDER BY u.name"
+    ).bind(user["id"], user["id"]).all()
+    return [{"employee_id": r["id"], "employee": r["name"],
+             "rep_rate": float(r["rep_rate"] if r["rep_rate"] is not None else defaults["rep_rate"]),
+             "manager_rate": float(r["manager_rate"] if r["manager_rate"] is not None else defaults["manager_rate"]),
+             "customized": r["rep_rate"] is not None} for r in _rows(rows)]
+
+
+@app.post("/api/incentive/team-rules")
+async def update_incentive_team_rule(request: Request):
+    user, error = await _require_user(request, ("manager",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        employee_id = int(data.get("employee_id", 0))
+        rep, manager = Decimal(str(data.get("rep_rate"))), Decimal(str(data.get("manager_rate")))
+        if not rep.is_finite() or not manager.is_finite() or min(rep, manager) < 0 or max(rep, manager) > 100 or rep + manager > 100:
+            raise ValueError("Employee and manager shares must total no more than 100%")
+    except (ValueError, TypeError, InvalidOperation) as exc:
+        return JSONResponse({"error": str(exc) or "Enter valid incentive shares"}, status_code=400)
+    db = _env(request).DB
+    employee = await _first(db.prepare("SELECT id FROM users WHERE id=? AND manager_id=? AND role='employee' AND is_active=1").bind(employee_id, user["id"]))
+    if not employee:
+        return JSONResponse({"error": "Choose an active direct report"}, status_code=403)
+    try:
+        await db.prepare("INSERT INTO manager_incentive_rules(employee_id,manager_id,rep_rate,manager_rate) VALUES(?,?,?,?) ON CONFLICT(employee_id) DO UPDATE SET manager_id=excluded.manager_id,rep_rate=excluded.rep_rate,manager_rate=excluded.manager_rate,updated_at=CURRENT_TIMESTAMP").bind(employee_id, user["id"], float(rep), float(manager)).run()
+        await _audit(db, user["id"], "updated", "manager_incentive_rule", employee_id)
+    except Exception:
+        return JSONResponse({"error": "The incentive rule was not saved; retry"}, status_code=409)
+    return {"ok": True}
+
+
+async def _commission_scope(db, user):
+    if user["role"] == "owner":
+        return None
+    if user["role"] == "employee":
+        return [user["id"]]
+    rows = await db.prepare("WITH RECURSIVE team(id) AS (SELECT ? UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) SELECT id FROM team").bind(user["id"]).all()
+    return [row["id"] for row in _rows(rows)]
+
+
+@app.get("/api/commissions")
+async def commissions(request: Request):
+    user, error = await _require_user(request, ("owner", "manager", "employee"))
+    if error:
+        return error
+    db = _env(request).DB
+    scope = await _commission_scope(db, user)
+    clause, binds = ("", []) if scope is None else (f" AND e.employee_id IN ({','.join('?' for _ in scope) or 'NULL'})", scope)
+    rows = _rows(await db.prepare(
+        "SELECT e.*,u.name employee_name,s.name seller_name,o.order_no,o.customer_id,c.name customer,p.paid_on "
+        "FROM commission_events e JOIN users u ON u.id=e.employee_id LEFT JOIN users s ON s.id=e.credited_employee_id "
+        "JOIN orders o ON o.id=e.order_id JOIN users sale_owner ON sale_owner.id=o.employee_id "
+        "JOIN customers c ON c.id=o.customer_id JOIN payments p ON p.id=e.payment_id "
+        "WHERE sale_owner.role!='owner'" + clause + " ORDER BY COALESCE(e.due_date,p.paid_on) DESC,e.id DESC"
+    ).bind(*binds).all())
+    offsets, balances = {}, {}
+    for row in rows:
+        if int(row["amount_minor"]) < 0:
+            offsets[row["employee_id"]] = offsets.get(row["employee_id"], 0) + abs(int(row["amount_minor"]))
+        else:
+            balances[row["id"]] = max(0, int(row["amount_minor"]) - int(row["paid_minor"]))
+    for row in sorted((r for r in rows if int(r["amount_minor"]) > 0), key=lambda r: (r["due_date"] or "9999-12-31", r["id"])):
+        uid, available = row["employee_id"], offsets.get(row["employee_id"], 0)
+        applied = min(balances[row["id"]], available)
+        balances[row["id"]] -= applied
+        offsets[uid] = available - applied
+    result = []
+    for row in rows:
+        amount = int(row["amount_minor"])
+        balance = balances.get(row["id"], 0) if amount >= 0 else -min(abs(amount), offsets.get(row["employee_id"], 0))
+        if amount < 0:
+            offsets[row["employee_id"]] = max(0, offsets.get(row["employee_id"], 0) - abs(balance))
+        entry = {"id": row["id"], "status": row["status"], "amount": _money(amount), "paid": _money(row["paid_minor"]),
+            "balance": _money(balance), "rate": round(float(row["rate"] or 0), 4), "earned_on": row["paid_on"], "date": row["paid_on"],
+            "due_date": row["due_date"], "paid_at": row["paid_at"], "employee_id": row["employee_id"],
+            "employee": row["employee_name"], "beneficiary_role": row["beneficiary_role"] or "seller",
+            "manager_level": row["manager_level"] or 0, "credited_employee_id": row["credited_employee_id"],
+            "credited_employee": row["seller_name"] or row["employee_name"], "order_id": row["order_id"],
+            "order_no": row["order_no"], "customer_id": row["customer_id"], "customer": row["customer"]}
+        if user["role"] != "manager":
+            entry["base"] = _money(row["base_minor"] or 0)
+        result.append(entry)
+    return result
+
+
+@app.get("/api/commissions/payouts")
+async def commission_payouts(request: Request):
+    user, error = await _require_user(request, ("owner", "manager", "employee"))
+    if error:
+        return error
+    db = _env(request).DB
+    scope = await _commission_scope(db, user)
+    clause, binds = ("", []) if scope is None else (f" AND p.employee_id IN ({','.join('?' for _ in scope) or 'NULL'})", scope)
+    rows = await db.prepare("SELECT p.*,u.name payee,actor.name recorded_by,COUNT(a.id) allocations FROM commission_payouts p JOIN users u ON u.id=p.employee_id LEFT JOIN users actor ON actor.id=p.created_by LEFT JOIN commission_payout_allocations a ON a.payout_id=p.id WHERE 1=1" + clause + " GROUP BY p.id ORDER BY p.paid_on DESC,p.id DESC").bind(*binds).all()
+    return [{"id": r["id"], "employee_id": r["employee_id"], "employee": r["payee"], "amount": _money(r["amount_minor"]),
+        "paid_on": r["paid_on"], "method": r["method"], "reference": r["reference"], "notes": r["notes"],
+        "recorded_by": r["recorded_by"], "allocations": r["allocations"]} for r in _rows(rows)]
+
+
+@app.post("/api/commissions/payout")
+async def pay_commission(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        uid = int(data.get("user_id", 0))
+        amount = _minor(data.get("amount"))
+        paid_on = date.fromisoformat(str(data.get("paid_on") or date.today().isoformat())).isoformat()
+        if paid_on > date.today().isoformat():
+            raise ValueError("A payout cannot be marked paid in the future")
+        if amount <= 0:
+            raise ValueError("Enter a payout amount greater than zero")
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Check the payout details"}, status_code=400)
+    db = _env(request).DB
+    person = await _first(db.prepare("SELECT id FROM users WHERE id=? AND role IN ('manager','employee') AND is_active=1").bind(uid))
+    if not person:
+        return JSONResponse({"error": "Choose an active team member"}, status_code=400)
+    events = _rows(await db.prepare("SELECT e.id,e.amount_minor,e.paid_minor,e.due_date FROM commission_events e JOIN orders o ON o.id=e.order_id JOIN users seller ON seller.id=o.employee_id AND seller.role!='owner' WHERE e.employee_id=? AND e.status='pending' AND e.amount_minor>e.paid_minor ORDER BY e.due_date,e.id").bind(uid).all())
+    refunds = await _first(db.prepare("SELECT COALESCE(SUM(-amount_minor),0) n FROM commission_events WHERE employee_id=? AND amount_minor<0").bind(uid))
+    recovery = int(refunds["n"] or 0)
+    eligible = []
+    for event in events:
+        open_amount = int(event["amount_minor"]) - int(event["paid_minor"])
+        offset = min(open_amount, recovery)
+        open_amount -= offset
+        recovery -= offset
+        if open_amount:
+            eligible.append((event, open_amount))
+    available = sum(amount for _, amount in eligible)
+    if amount > available:
+        return JSONResponse({"error": "Payout exceeds the employee’s net payable incentive"}, status_code=400)
+    method = str(data.get("method") or "Bank transfer").strip()[:80] or "Bank transfer"
+    reference = str(data.get("reference", "")).strip()[:120] or None
+    notes = str(data.get("notes", "")).strip()[:500] or None
+    # Build the payout and all ledger allocations in one D1 batch. A concurrent
+    # payout may choose the same candidate ID; the unique constraint safely
+    # rejects one transaction rather than leaving an unallocated payout row.
+    next_id = await _first(db.prepare("SELECT COALESCE(MAX(id),0)+1 id FROM commission_payouts"))
+    payout_id = int(next_id["id"])
+    statements = [db.prepare("INSERT INTO commission_payouts(id,employee_id,amount_minor,paid_on,method,reference,notes,created_by) VALUES(?,?,?,?,?,?,?,?)").bind(payout_id, uid, amount, paid_on, method, reference, notes, user["id"])]
+    remaining = amount
+    for event, available_event in eligible:
+        if not remaining:
+            break
+        applied = min(remaining, available_event)
+        new_paid = int(event["paid_minor"]) + applied
+        state = "paid" if new_paid >= int(event["amount_minor"]) else "pending"
+        statements.append(db.prepare("UPDATE commission_events SET paid_minor=?,status=?,paid_at=? WHERE id=?").bind(new_paid, state, paid_on, event["id"]))
+        statements.append(db.prepare("INSERT INTO commission_payout_allocations(payout_id,commission_event_id,amount_minor) VALUES(?,?,?)").bind(payout_id, event["id"], applied))
+        remaining -= applied
+    statements.append(db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'paid','incentive_payout',?)").bind(user["id"], payout_id))
+    try:
+        await db.batch(statements)
+    except Exception:
+        return JSONResponse({"error": "Payout allocation failed; refresh before trying again"}, status_code=409)
+    return {"ok": True, "payout_id": payout_id}
+
+
+@app.post("/api/commissions/due-date")
+async def commission_due_date(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        event_id = int(data.get("event_id", 0))
+        due_date = date.fromisoformat(str(data.get("due_date", ""))).isoformat()
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Choose an incentive and valid due date"}, status_code=400)
+    db = _env(request).DB
+    row = await _first(db.prepare("SELECT id,amount_minor,paid_minor,status FROM commission_events WHERE id=?").bind(event_id))
+    if not row or row["status"] != "pending" or int(row["amount_minor"]) <= int(row["paid_minor"]):
+        return JSONResponse({"error": "Only an unpaid incentive can be rescheduled"}, status_code=400)
+    await db.prepare("UPDATE commission_events SET due_date=? WHERE id=?").bind(due_date, event_id).run()
+    await _audit(db, user["id"], "rescheduled", "incentive", event_id)
+    return {"ok": True, "due_date": due_date}
+
+
+async def _target_user_scope(db, user):
+    if user["role"] == "owner":
+        return await db.prepare("SELECT id,name,email,role,manager_id FROM users WHERE role IN ('manager','employee') AND is_active=1 ORDER BY CASE role WHEN 'manager' THEN 0 ELSE 1 END,name").all()
+    return await db.prepare("WITH RECURSIVE team(id) AS (SELECT ? UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) SELECT u.id,u.name,u.email,u.role,u.manager_id FROM users u JOIN team t ON t.id=u.id WHERE u.role IN ('manager','employee') AND u.is_active=1 ORDER BY CASE u.role WHEN 'manager' THEN 0 ELSE 1 END,u.name").bind(user["id"]).all()
+
+
+async def _target_plan_for_person(db, person, month):
+    start = date.fromisoformat(month + "-01")
+    end = date.fromisoformat((date(start.year + (start.month == 12), 1 if start.month == 12 else start.month + 1, 1)).isoformat())
+    saved = await _first(db.prepare("SELECT conversion_target,assigned_by FROM targets WHERE user_id=? AND period=? AND period_type='monthly'").bind(person["id"], month))
+    target = int(saved["conversion_target"] or 0) if saved else 0
+    actual_end = min(end, date.today() + timedelta(days=1)) if start <= date.today() else start
+    actual = await _first(db.prepare("SELECT COUNT(*) n FROM orders WHERE employee_id=? AND status='active' AND order_date>=? AND order_date<?").bind(person["id"], start.isoformat(), actual_end.isoformat()))
+    course_rows = await db.prepare("SELECT t.product_id,t.conversion_target,t.unit_price_minor,t.commission_rate,p.name,p.currency FROM target_course_targets t JOIN products p ON p.id=t.product_id WHERE t.user_id=? AND t.month_period=? ORDER BY p.name").bind(person["id"], month).all()
+    course_targets = []
+    today = date.today()
+    rates = {
+        "pool": float(await _setting(db, "incentive_pool_rate", "5")),
+        "rep": float(await _setting(db, "incentive_rep_rate", "2")),
+        "manager": float(await _setting(db, "incentive_manager_rate", "3")),
+    }
+    for course in _rows(course_rows):
+        product_id = course["product_id"]
+        sales = await _first(db.prepare("SELECT COALESCE(SUM(oi.quantity),0) n FROM orders o JOIN order_items oi ON oi.order_id=o.id WHERE o.employee_id=? AND o.status='active' AND oi.product_id=? AND o.order_date>=? AND o.order_date<?").bind(person["id"], product_id, start.isoformat(), actual_end.isoformat()))
+        reports = await db.prepare("SELECT id,student_name,converted_on,notes FROM target_conversion_reports WHERE user_id=? AND product_id=? AND converted_on>=? AND converted_on<? ORDER BY converted_on,id").bind(person["id"], product_id, start.isoformat(), actual_end.isoformat()).all()
+        sales_count = int(sales["n"] or 0)
+        # Check-ins matched by student/date are not counted twice.
+        unmatched = []
+        for report in _rows(reports):
+            match = await _first(db.prepare("SELECT 1 ok FROM orders o JOIN customers c ON c.id=o.customer_id JOIN order_items oi ON oi.order_id=o.id WHERE o.employee_id=? AND oi.product_id=? AND o.status='active' AND o.order_date=? AND lower(trim(c.name))=lower(trim(?)) LIMIT 1").bind(person["id"], product_id, report["converted_on"], report["student_name"]))
+            report["matched_to_sale"] = bool(match)
+            if not match:
+                unmatched.append(report)
+        completed = sales_count + len(unmatched)
+        goal = int(course["conversion_target"] or 0)
+        price = int(course["unit_price_minor"] or 0)
+        rate = float(course["commission_rate"] or 0)
+        seller_rate = rate if person["role"] == "manager" else min(rates["rep"], rate)
+        manager_rate = 0 if person["role"] == "manager" else min(rates["manager"], max(0, rate - seller_rate))
+        first_week, cursor, course_carry, course_weeks = start - timedelta(days=start.weekday()), start - timedelta(days=start.weekday()), 0, []
+        while cursor < end:
+            week_end = cursor + timedelta(days=7)
+            allocation = await _first(db.prepare("SELECT conversion_target FROM target_course_week_allocations WHERE user_id=? AND month_period=? AND week_start=? AND product_id=?").bind(person["id"], month, cursor.isoformat(), product_id))
+            weekly_sales = await _first(db.prepare("SELECT COALESCE(SUM(oi.quantity),0) n FROM orders o JOIN order_items oi ON oi.order_id=o.id WHERE o.employee_id=? AND o.status='active' AND oi.product_id=? AND o.order_date>=? AND o.order_date<?").bind(person["id"], product_id, max(start, cursor).isoformat(), min(end, week_end, today + timedelta(days=1)).isoformat()))
+            weekly_reported = sum(1 for report in unmatched if max(start, cursor).isoformat() <= report["converted_on"] < min(end, week_end).isoformat())
+            completed_week = int(weekly_sales["n"] or 0) + weekly_reported
+            base = int(allocation["conversion_target"] or 0) if allocation else 0
+            goal_week = base + course_carry
+            remaining_week = max(0, goal_week - completed_week)
+            status_week = "completed" if goal_week and remaining_week == 0 else "overdue" if week_end <= today and remaining_week else "current" if cursor <= today < week_end and goal_week else "upcoming" if goal_week else "no_goal"
+            course_weeks.append({"week_start": cursor.isoformat(), "week_end": (week_end - timedelta(days=1)).isoformat(), "base_target": base, "carry_in": course_carry, "target": goal_week, "completed": completed_week, "remaining": remaining_week, "status": status_week})
+            if week_end <= today:
+                course_carry = remaining_week
+            cursor = week_end
+        course_current = next((week for week in course_weeks if week["week_start"] <= today.isoformat() <= week["week_end"]), None)
+        course_targets.append({"product_id": product_id, "name": course["name"], "currency": course["currency"],
+            "target": goal, "unit_price": price / 100, "estimated_income": goal * price / 100,
+            "actual_income_estimate": completed * price / 100, "completed": completed,
+            "sales_completed": sales_count, "reported_completed": len(unmatched),
+            "remaining": max(0, goal - completed), "percent": round(min(100, completed / goal * 100), 1) if goal else 0,
+            "commission_rate": rate, "estimated_incentive": round(goal * price * seller_rate / 100) / 100,
+            "earned_incentive_estimate": round(completed * price * seller_rate / 100) / 100,
+            "manager_share_estimate": round(goal * price * manager_rate / 100) / 100,
+            "current_week": course_current, "weeks": course_weeks, "reports": unmatched})
+    if course_targets:
+        target = sum(c["target"] for c in course_targets)
+        completed_count = sum(c["completed"] for c in course_targets)
+    else:
+        completed_count = int(actual["n"] or 0)
+    month_end = end
+    cursor = start - timedelta(days=start.weekday())
+    today = date.today()
+    weekly = []
+    carry = 0
+    current_week = today - timedelta(days=today.weekday())
+    while cursor < month_end:
+        week_end = cursor + timedelta(days=7)
+        allocation = await _first(db.prepare("SELECT conversion_target FROM target_week_allocations WHERE user_id=? AND month_period=? AND week_start=?").bind(person["id"], month, cursor.isoformat()))
+        override = await _first(db.prepare("SELECT conversion_target FROM targets WHERE user_id=? AND period=? AND period_type='weekly'").bind(person["id"], cursor.isoformat()))
+        base = int(override["conversion_target"] if override else (allocation["conversion_target"] if allocation else 0))
+        actual_week = await _first(db.prepare("SELECT COUNT(*) n FROM orders WHERE employee_id=? AND status='active' AND order_date>=? AND order_date<?").bind(person["id"], max(start, cursor).isoformat(), min(month_end, week_end, today + timedelta(days=1)).isoformat()))
+        done = int(actual_week["n"] or 0)
+        weekly_goal = base + carry
+        remaining = max(0, weekly_goal - done)
+        status = "completed" if weekly_goal and remaining == 0 else "overdue" if week_end <= today and remaining else "current" if cursor <= today < week_end and weekly_goal else "upcoming" if weekly_goal else "no_goal"
+        weekly.append({"week_start": cursor.isoformat(), "week_end": (week_end - timedelta(days=1)).isoformat(), "base_target": base, "carry_in": carry, "target": weekly_goal, "completed": done, "remaining": remaining, "status": status, "manual": bool(override)})
+        if cursor <= current_week < week_end:
+            carry_current = carry
+            current_week_data = weekly[-1]
+        if week_end <= today:
+            carry = remaining
+        cursor = week_end
+    if not weekly:
+        carry_current, current_week_data = 0, {"target": 0, "completed": 0, "remaining": 0}
+    else:
+        current_week_data = next((w for w in weekly if w["week_start"] <= today.isoformat() <= w["week_end"]), weekly[0])
+        carry_current = current_week_data["carry_in"]
+    if course_targets:
+        week_map = {}
+        for course in course_targets:
+            for item in course["weeks"]:
+                entry = week_map.setdefault(item["week_start"], {"week_start": item["week_start"], "week_end": item["week_end"], "base_target": 0, "carry_in": 0, "target": 0, "completed": 0, "remaining": 0, "status": item["status"], "manual": False})
+                for key in ("base_target", "carry_in", "target", "completed", "remaining"):
+                    entry[key] += item[key]
+                if item["status"] == "overdue": entry["status"] = "overdue"
+                elif item["status"] == "current" and entry["status"] != "overdue": entry["status"] = "current"
+        weekly = list(week_map.values())
+        current_week_data = next((w for w in weekly if w["week_start"] <= today.isoformat() <= w["week_end"]), weekly[0] if weekly else {"target": 0, "completed": 0, "remaining": 0, "carry_in": 0})
+        carry_current = current_week_data["carry_in"]
+    price_goal = sum(c["estimated_income"] for c in course_targets) if course_targets else 0
+    own_incentive = sum(c["estimated_incentive"] for c in course_targets) if course_targets else 0
+    team_share = sum(c["manager_share_estimate"] for c in course_targets) if course_targets else 0
+    return {"id": person["id"], "name": person["name"], "email": person["email"], "role": person["role"], "manager_id": person["manager_id"],
+        "monthly_target": target, "assigned_by": saved["assigned_by"] if saved else None, "monthly_completed": completed_count,
+        "monthly_remaining": max(0, target - completed_count), "monthly_percent": round(min(100, completed_count / target * 100), 1) if target else 0,
+        "current_week_target": current_week_data["target"], "current_week_completed": current_week_data["completed"],
+        "current_week_remaining": current_week_data["remaining"], "carry_forward": carry_current, "weeks": weekly,
+        "course_targets": course_targets, "estimated_income": price_goal, "actual_income_estimate": sum(c["actual_income_estimate"] for c in course_targets),
+        "estimated_own_incentive": own_incentive, "estimated_manager_share": team_share,
+        "estimated_team_incentive": 0, "estimated_total_incentive": own_incentive + team_share}
+
+
+@app.get("/api/targets")
+async def targets(request: Request):
+    user, error = await _require_user(request, ("owner", "manager"))
+    if error:
+        return error
+    month = _month_key(request.query_params.get("month"))
+    db = _env(request).DB
+    people = _rows(await _target_user_scope(db, user))
+    plans = [await _target_plan_for_person(db, person, month) for person in people]
+    by_id = {plan["id"]: plan for plan in plans}
+    for manager in (plan for plan in plans if plan["role"] == "manager"):
+        descendants, frontier = set(), [manager["id"]]
+        while frontier:
+            parent = frontier.pop()
+            for child in plans:
+                if child["manager_id"] == parent and child["id"] not in descendants:
+                    descendants.add(child["id"])
+                    frontier.append(child["id"])
+        manager["team_conversion_target"] = sum(by_id[uid]["monthly_target"] for uid in descendants)
+        manager["estimated_team_incentive"] = round(sum(by_id[uid]["estimated_manager_share"] for uid in descendants if by_id[uid]["role"] == "employee"), 2)
+        manager["estimated_total_incentive"] = round(manager["estimated_own_incentive"] + manager["estimated_team_incentive"], 2)
+    rates = {"pool_rate": float(await _setting(db, "incentive_pool_rate", "5")), "rep_rate": float(await _setting(db, "incentive_rep_rate", "2")), "manager_rate": float(await _setting(db, "incentive_manager_rate", "3"))}
+    if user["role"] == "manager":
+        for plan in plans:
+            for key in ("estimated_income", "actual_income_estimate"):
+                plan.pop(key, None)
             for course in plan["course_targets"]:
                 for key in ("unit_price", "estimated_income", "actual_income_estimate", "sales_completed"):
                     course.pop(key, None)
@@ -1462,6 +2456,9 @@ async def invoices(request: Request):
     if user["role"] == "manager":
         scope = " AND o.employee_id IN (WITH RECURSIVE team(id) AS (SELECT id FROM users WHERE manager_id=? AND is_active=1 UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) SELECT id FROM team UNION SELECT ?)"
         binds = [user["id"], user["id"]]
+    elif user["role"] == "employee":
+        scope = " AND o.employee_id=?"
+        binds = [user["id"]]
     rows = await db.prepare(
         "SELECT i.id,i.order_id,i.invoice_no,i.issued_on,i.status,i.invoice_kind,i.installment_id,"
         "inst.installment_no,inst.due_date,COALESCE(ip.installment_received_minor,0) installment_received_minor,"
@@ -1510,6 +2507,9 @@ async def create_invoice(request: Request):
     if user["role"] == "manager":
         scope = " AND o.employee_id IN (WITH RECURSIVE team(id) AS (SELECT id FROM users WHERE manager_id=? AND is_active=1 UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) SELECT id FROM team UNION SELECT ?)"
         binds.extend([user["id"], user["id"]])
+    elif user["role"] == "employee":
+        scope = " AND o.employee_id=?"
+        binds.append(user["id"])
     if user["role"] == "employee":
         scope += " AND o.employee_id=?"
         binds.append(user["id"])
@@ -1586,6 +2586,9 @@ async def _invoice_detail(request: Request, invoice_id: int):
     if user["role"] == "manager":
         scope = " AND o.employee_id IN (WITH RECURSIVE team(id) AS (SELECT id FROM users WHERE manager_id=? AND is_active=1 UNION ALL SELECT u.id FROM users u JOIN team t ON u.manager_id=t.id WHERE u.is_active=1) SELECT id FROM team UNION SELECT ?)"
         binds.extend([user["id"], user["id"]])
+    elif user["role"] == "employee":
+        scope = " AND o.employee_id=?"
+        binds.append(user["id"])
     row = await _first(db.prepare(
         "SELECT i.id,i.order_id,i.invoice_no,i.issued_on,i.status,i.invoice_kind,i.installment_id,"
         "o.order_no,o.order_date,o.currency,o.subtotal_minor,o.discount_minor,o.tax_minor,o.total_minor,"
@@ -1786,6 +2789,241 @@ async def auth_logout(request: Request):
     response = JSONResponse({"ok": True})
     response.delete_cookie("offtune_session", path="/", secure=True, httponly=True, samesite="strict")
     return response
+
+
+def _validated_image_data(value, label="image"):
+    image = str(value or "")
+    if not image:
+        return ""
+    if len(image) > 700000:
+        raise ValueError(f"{label.capitalize()} must be under 512 KB")
+    header, sep, payload = image.partition(",")
+    mime = header[5:].split(";", 1)[0] if sep and header.startswith("data:") else ""
+    if mime not in ("image/png", "image/jpeg", "image/webp") or ";base64" not in header:
+        raise ValueError("Choose a PNG, JPEG or WebP image")
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (ValueError, binascii.Error):
+        raise ValueError("That image file could not be read")
+    signatures = {"image/png": b"\x89PNG\r\n\x1a\n", "image/jpeg": b"\xff\xd8", "image/webp": b"RIFF"}
+    if not raw or len(raw) > 512000 or not raw.startswith(signatures[mime]) or (mime == "image/webp" and raw[8:12] != b"WEBP"):
+        raise ValueError(f"Choose a valid PNG, JPEG or WebP {label} under 512 KB")
+    return image
+
+
+@app.post("/api/auth/profile")
+async def update_owner_profile(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        name = str(data.get("name", "")).strip()
+        email = str(data.get("email", "")).strip().lower()
+        if not name or len(name) > 120 or "@" not in email or len(email) > 254 or any(ch.isspace() for ch in email):
+            raise ValueError("Enter a valid owner name and email")
+        current = await _first(_env(request).DB.prepare("SELECT password_hash FROM users WHERE id=? AND role='owner'").bind(user["id"]))
+        if not current or not _password_matches(str(data.get("current_password", "")), str(current["password_hash"])):
+            return JSONResponse({"error": "Current password is incorrect"}, status_code=401)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    db = _env(request).DB
+    duplicate = await _first(db.prepare("SELECT id FROM users WHERE lower(email)=? AND id<>?").bind(email, user["id"]))
+    if duplicate:
+        return JSONResponse({"error": "That email is already used by another account"}, status_code=409)
+    try:
+        await db.batch([
+            db.prepare("UPDATE users SET name=?,email=? WHERE id=?").bind(name, email, user["id"]),
+            db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'updated','owner_profile',?)").bind(user["id"], user["id"]),
+        ])
+    except Exception:
+        return JSONResponse({"error": "Owner profile was not saved"}, status_code=409)
+    return {"ok": True, "user": {"id": user["id"], "name": name, "email": email, "role": "owner", "manager_id": None}}
+
+
+@app.post("/api/auth/reset-password")
+async def reset_owner_password(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        password = str(data.get("password", ""))
+        if len(password) < 12:
+            raise ValueError("Use a password with at least 12 characters")
+        owner = await _first(_env(request).DB.prepare("SELECT password_hash FROM users WHERE id=? AND role='owner'").bind(user["id"]))
+        if not owner or not _password_matches(str(data.get("current_password", "")), str(owner["password_hash"])):
+            return JSONResponse({"error": "Current password is incorrect"}, status_code=401)
+        new_hash = _hash_password(password)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    cookie = request.cookies.get("offtune_session")
+    if not cookie:
+        return JSONResponse({"error": "Sign in again to reset your password"}, status_code=401)
+    token_hash = hashlib.sha256(cookie.encode()).hexdigest()
+    db = _env(request).DB
+    try:
+        await db.batch([
+            db.prepare("UPDATE users SET password_hash=? WHERE id=?").bind(new_hash, user["id"]),
+            db.prepare("DELETE FROM sessions WHERE user_id=? AND token_hash<>?").bind(user["id"], token_hash),
+            db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'reset','password',?)").bind(user["id"], user["id"]),
+        ])
+    except Exception:
+        return JSONResponse({"error": "Password was not changed; retry the update"}, status_code=409)
+    return {"ok": True, "other_sessions_signed_out": True}
+
+
+@app.post("/api/profile")
+async def update_profile(request: Request):
+    user, error = await _require_user(request, ("owner", "manager", "employee"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        name = str(data.get("name", "")).strip()
+        if not name or len(name) > 120:
+            raise ValueError("Enter a name up to 120 characters")
+        image = _validated_image_data(data.get("data_url"), "profile photo")
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    db = _env(request).DB
+    sql = "UPDATE users SET name=?,avatar_data=? WHERE id=?" if image else "UPDATE users SET name=? WHERE id=?"
+    args = (name, image, user["id"]) if image else (name, user["id"])
+    await db.batch([db.prepare(sql).bind(*args), db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'updated','own_profile',?)").bind(user["id"], user["id"])])
+    fresh = await _first(db.prepare("SELECT id,name,email,role,manager_id,job_title,designation_id,avatar_data FROM users WHERE id=?").bind(user["id"]))
+    return {"ok": True, "user": fresh}
+
+
+@app.post("/api/profile/avatar")
+async def update_profile_avatar(request: Request):
+    user, error = await _require_user(request, ("owner", "manager", "employee"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        target = int(data.get("user_id") or user["id"])
+        if target != user["id"] and user["role"] != "owner":
+            return JSONResponse({"error": "You can update only your own profile photo"}, status_code=403)
+        image = _validated_image_data(data.get("data_url"), "profile photo")
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    db = _env(request).DB
+    person = await _first(db.prepare("SELECT id FROM users WHERE id=? AND is_active=1").bind(target))
+    if not person:
+        return JSONResponse({"error": "Account not found"}, status_code=404)
+    await db.batch([db.prepare("UPDATE users SET avatar_data=? WHERE id=?").bind(image, target), db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'updated','profile_photo',?)").bind(user["id"], target)])
+    return {"ok": True, "avatar_data": image, "user_id": target}
+
+
+@app.post("/api/settings/logo")
+async def update_business_logo(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        image = _validated_image_data(data.get("data_url"), "logo")
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    customized = "1" if image else "0"
+    db = _env(request).DB
+    try:
+        await db.batch([
+            db.prepare("INSERT INTO settings(key,value) VALUES('invoice_logo_data',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(image),
+            db.prepare("INSERT INTO settings(key,value) VALUES('invoice_logo_customized',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(customized),
+            db.prepare("INSERT INTO audit_log(actor_id,action,entity) VALUES(?,?, 'invoice_logo')").bind(user["id"], "updated" if image else "restored_default"),
+        ])
+    except Exception:
+        return JSONResponse({"error": "Logo was not saved; retry the update"}, status_code=409)
+    return {"ok": True, "has_logo": bool(image), "customized": bool(image)}
+
+
+@app.post("/api/data/reset")
+async def reset_workspace_data(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        scope = str(data.get("scope", "records")).strip()
+        if scope not in ("records", "workspace"):
+            raise ValueError("Choose a valid reset scope")
+        if data.get("confirmed") is not True:
+            raise ValueError("Confirm the selected reset")
+        if len(str(data.get("current_password", ""))) < 1:
+            raise ValueError("Enter your current password to continue")
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    db = _env(request).DB
+    owner = await _first(db.prepare("SELECT password_hash FROM users WHERE id=? AND role='owner'").bind(user["id"]))
+    if not owner or not _password_matches(str(data.get("current_password", "")), str(owner["password_hash"])):
+        return JSONResponse({"error": "Current password is incorrect"}, status_code=401)
+    open_link = await _first(db.prepare("SELECT id FROM razorpay_payment_links WHERE status IN ('created','partially_paid') LIMIT 1").bind())
+    if open_link:
+        return JSONResponse({"error": "Close or reconcile open online payment links before resetting student records"}, status_code=409)
+    reset_tables = ["razorpay_webhook_events", "razorpay_payment_links", "commission_payout_allocations", "commission_payouts",
+        "manager_incentive_rules", "commission_events", "target_conversion_reports", "invoices", "followup_logs",
+        "payment_allocations", "payments", "installments", "order_items", "orders", "customers", "expenses"]
+    statements = []
+    if scope == "workspace":
+        reset_tables = ["email_outbox"] + reset_tables + ["target_course_week_allocations", "target_course_targets", "target_week_allocations", "targets"]
+    else:
+        statements.append(db.prepare("DELETE FROM email_outbox WHERE installment_id IN (SELECT id FROM installments) OR dedupe_key LIKE 'invoice-send:%'"))
+    statements.extend(db.prepare(f"DELETE FROM {table}") for table in reset_tables)
+    if scope == "workspace":
+        statements.extend([
+            db.prepare("DELETE FROM team_messages"), db.prepare("DELETE FROM batches"), db.prepare("DELETE FROM products"),
+            db.prepare("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE role!='owner')"),
+            db.prepare("UPDATE users SET manager_id=NULL WHERE id<>?").bind(user["id"]),
+            db.prepare("DELETE FROM users WHERE id<>?").bind(user["id"]),
+            db.prepare("DELETE FROM designations WHERE is_system=0"), db.prepare("DELETE FROM audit_log"), db.prepare("DELETE FROM settings"),
+        ])
+        defaults = {**BUSINESS_SETTING_DEFAULTS, "invoice_logo_data": "", "invoice_logo_customized": "0", "next_invoice_number": "1001"}
+        statements.extend(db.prepare("INSERT INTO settings(key,value) VALUES(?,?)").bind(key, value) for key, value in defaults.items())
+    statements.append(db.prepare("INSERT INTO audit_log(actor_id,action,entity) VALUES(?,?,?)").bind(user["id"], "factory_reset" if scope == "workspace" else "records_reset", scope))
+    try:
+        await db.batch(statements)
+    except Exception:
+        return JSONResponse({"error": "Reset was not completed; no partial reset was kept"}, status_code=409)
+    return {"ok": True, "scope": scope}
+
+
+@app.post("/api/team/preview")
+async def preview_team_workspace(request: Request):
+    owner, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    cookie = request.cookies.get("offtune_session")
+    token_hash = hashlib.sha256(cookie.encode()).hexdigest()
+    db = _env(request).DB
+    current = await _first(db.prepare("SELECT act_as_user_id FROM sessions WHERE token_hash=?").bind(token_hash))
+    if not current or current["act_as_user_id"]:
+        return JSONResponse({"error": "Return to the owner workspace before switching again"}, status_code=409)
+    try:
+        data = await request.json()
+        target = int(data.get("user_id", 0))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "Choose an active team member"}, status_code=400)
+    person = await _first(db.prepare("SELECT id FROM users WHERE id=? AND role IN ('manager','employee') AND is_active=1").bind(target))
+    if not person:
+        return JSONResponse({"error": "Choose an active manager or employee"}, status_code=400)
+    await db.batch([db.prepare("UPDATE sessions SET act_as_user_id=? WHERE token_hash=?").bind(target, token_hash), db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'opened_workspace_preview','user',?)").bind(owner["id"], target)])
+    return {"ok": True}
+
+
+@app.post("/api/team/preview/end")
+async def end_team_workspace_preview(request: Request):
+    user, error = await _require_user(request, ("manager", "employee"))
+    if error:
+        return error
+    cookie = request.cookies.get("offtune_session")
+    token_hash = hashlib.sha256(cookie.encode()).hexdigest()
+    db = _env(request).DB
+    session = await _first(db.prepare("SELECT s.user_id owner_id,s.act_as_user_id,u.role owner_role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?").bind(token_hash))
+    if not session or session["owner_role"] != "owner" or not session["act_as_user_id"]:
+        return JSONResponse({"error": "You are already in the owner workspace"}, status_code=409)
+    await db.batch([db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'returned_from_workspace_preview','user',?)").bind(session["owner_id"], session["act_as_user_id"]), db.prepare("UPDATE sessions SET act_as_user_id=NULL WHERE token_hash=?").bind(token_hash)])
+    return {"ok": True}
 
 
 @app.api_route("/{path:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"])
