@@ -238,7 +238,12 @@ async function navigate(page,initial=null) {
   state.page = page; renderNav();
   const meta = navItems().find(x => x.id === page); if (!meta) return;
   $("#page-title").textContent = meta.label;
-  $("#content").innerHTML = `<div class="loading"><span></span>Loading your workspace</div>`;
+  const content=$("#content");
+  content.setAttribute("aria-busy","true");
+  content.inert=true;
+  const loadingTimer=setTimeout(()=>{
+    if(generation===navigationGeneration)content.innerHTML=`<div class="loading"><span></span>Loading your workspace</div>`;
+  },initial?300:650);
   try {
     const needsDashboard = page === "overview" || page === "team";
     const range = page === "overview" ? initial?.range||overviewRange(state.overviewPreset) : null;
@@ -261,22 +266,26 @@ async function navigate(page,initial=null) {
       if (targetCourses) d.targetCourses=targetCourses;
       renderDashboard(d);
     }
-    else if (page === "my-goals") { d.targetCourses=await api("/api/targets/self?month="+encodeURIComponent((state.targetsMonth||today().slice(0,7)))); renderEmployeeGoals(d); }
+    else if (page === "my-goals") { d.targetCourses=await api("/api/targets/self?month="+encodeURIComponent((state.targetsMonth||today().slice(0,7)))); if(generation!==navigationGeneration)return; renderEmployeeGoals(d); }
     else if (page === "my-students") { renderEmployeeStudents(); }
     else if (page === "messages") { $("#content").innerHTML=`<div class="welcome-row"><div><p class="eyebrow">TEAM MESSAGES</p><h2>Your inbox</h2><p class="muted">Owner and manager reminders, plus your conversations.</p></div></div>${teamReminderPanel()}`; }
     else if (page === "targets") await renderTargets();
-    else if (page === "collections") renderCollectionsWorkspace();
-    else if (page === "followup") renderFollowupWorkspace();
+    else if (page === "collections") await renderCollectionsWorkspace();
+    else if (page === "followup") await renderFollowupWorkspace();
     else if (page === "products") renderProducts();
-    else if (page === "batches") renderBatches();
-    else if (page === "analytics") renderAnalytics();
-    else if (page === "expenses") renderExpenses();
-    else if (page === "incentives") renderIncentives();
-    else if (page === "invoices") renderInvoices();
+    else if (page === "batches") await renderBatches();
+    else if (page === "analytics") await renderAnalytics();
+    else if (page === "expenses") await renderExpenses();
+    else if (page === "incentives") await renderIncentives();
+    else if (page === "invoices") await renderInvoices();
     else if (page === "team") await renderTeam(d);
-    else if (page === "reports") renderReports();
-    else if (page === "settings") renderSettings();
-  } catch (e) { if(generation===navigationGeneration)$("#content").innerHTML = `<div class="notice error">${esc(e.message)}</div>`; }
+    else if (page === "reports") await renderReports();
+    else if (page === "settings") await renderSettings();
+  } catch (e) { if(generation===navigationGeneration)content.innerHTML = `<div class="notice error">${esc(e.message)}</div>`; }
+  finally {
+    clearTimeout(loadingTimer);
+    if(generation===navigationGeneration){content.inert=false;content.removeAttribute("aria-busy");}
+  }
 }
 
 function overviewRange(preset=state.overviewPreset) {
@@ -536,7 +545,7 @@ function showFinancePanel(section=state.financeSection||"overview"){
 }
 function renderCollectionsWorkspace(){
   const generation=navigationGeneration;
-  Promise.all([api("/api/payments"),api("/api/installments"),api("/api/analytics/batches"),api("/api/analytics/courses")]).then(([payments,installments,batchAnalytics,courseAnalytics])=>{
+  return Promise.all([api("/api/payments"),api("/api/installments"),api("/api/analytics/batches"),api("/api/analytics/courses")]).then(([payments,installments,batchAnalytics,courseAnalytics])=>{
     if(generation!==navigationGeneration)return;
     state.installments=installments;state.data.collectionPayments=payments;
     const val=x=>Number(String(x||0).replace(/,/g,"").replace(/[^0-9.-]/g,""))||0;
@@ -670,7 +679,7 @@ function renderCollectionsWorkspace(){
 }
 function renderFollowupWorkspace(){
   const generation=navigationGeneration;
-  Promise.all([api("/api/payments"),api("/api/installments"),api("/api/followup/settings")]).then(([payments,items,followupConfig])=>{
+  return Promise.all([api("/api/payments"),api("/api/installments"),api("/api/followup/settings")]).then(([payments,items,followupConfig])=>{
     if(generation!==navigationGeneration)return;
     const employee=state.user.role==="employee",nonOwner=state.user.role!=="owner";
     state.installments=items;
@@ -801,7 +810,7 @@ function openCourseStudents(courseName){
 }
 function renderBatches() {
   const generation=navigationGeneration;
-  api("/api/analytics/batches").then(stats=>{
+  return api("/api/analytics/batches").then(stats=>{
     if(generation!==navigationGeneration)return;
     const employee=state.user.role==="employee",nonOwner=state.user.role!=="owner";
     const byId=new Map(stats.map(x=>[x.batch_id,x]));
@@ -854,7 +863,7 @@ function renderBatches() {
 }
 function renderAnalytics() {
   const generation=navigationGeneration;
-  api("/api/analytics/courses").then(rows=>{
+  return api("/api/analytics/courses").then(rows=>{
     if(generation!==navigationGeneration)return;
     const employee=state.user.role==="employee",nonOwner=state.user.role!=="owner";
     const productCourses=state.products.filter(p=>p.product_type==="course");
@@ -927,7 +936,7 @@ function renderAnalytics() {
 }
 function renderExpenses() {
   const generation=navigationGeneration;
-  api("/api/expenses").then(es=>{
+  return api("/api/expenses").then(es=>{
     if(generation!==navigationGeneration)return;
     const owner=state.user.role==="owner";
     const rows=es.map(e=>`<tr><td>${day(e.date)}</td><td>${esc(e.category)}</td><td>${esc(e.description)}</td><td>${money(e.amount)}</td><td>${esc(e.method||"—")}</td><td>${e.recurring?statusBadge("active"):"—"}</td>${owner?`<td>${btn("Delete","delete-expense:"+e.id,"button small danger")}</td>`:""}</tr>`);
@@ -959,7 +968,7 @@ function renderIncentives() {
     if(error.message==="/api/commissions/payouts: Not found"){compatibility.payoutsUnavailable=true;return [];}
     throw error;
   });
-  Promise.all([loadIncentiveData("/api/commissions"), state.user.role==="employee"?Promise.resolve([]):loadIncentiveData("/api/team"), loadIncentiveRules, loadPayoutHistory]).then(([allEvents,loadedTeam,rules,payoutHistory])=>{
+  return Promise.all([loadIncentiveData("/api/commissions"), state.user.role==="employee"?Promise.resolve([]):loadIncentiveData("/api/team"), loadIncentiveRules, loadPayoutHistory]).then(([allEvents,loadedTeam,rules,payoutHistory])=>{
     if(generation!==navigationGeneration)return;
     const employee=state.user.role==="employee", todayIso=today(), visibleEvents=state.user.role==="owner"?allEvents.filter(e=>Number(e.employee_id)!==Number(state.user.id)):allEvents;
     const allEventsSorted=[...allEvents].sort((a,b)=>String(a.due_date||"").localeCompare(String(b.due_date||""))||Number(b.balance)-Number(a.balance));
@@ -1299,7 +1308,7 @@ function renderReports() {
   const generation=navigationGeneration;
 
   const isOwner=state.user.role==="owner";
-  Promise.all([api("/api/orders"),api("/api/payments"),api("/api/installments"),api("/api/commissions"),isOwner?api("/api/expenses"):Promise.resolve([])]).then(([orders,payments,installments,commissions,expenses])=>{
+  return Promise.all([api("/api/orders"),api("/api/payments"),api("/api/installments"),api("/api/commissions"),isOwner?api("/api/expenses"):Promise.resolve([])]).then(([orders,payments,installments,commissions,expenses])=>{
     if(generation!==navigationGeneration)return;
     if(state.user.role==="manager"){renderManagerReports(orders,payments,installments,commissions);return;}
     state.orders=orders;
@@ -1389,7 +1398,7 @@ async function exportWorkspaceBackup(){
 function renderSettings(){
   const generation=navigationGeneration;
   const s=state.settings||{};
-  Promise.all([api("/api/team").catch(()=>state.team||[]),api("/api/audit").catch(()=>[]),api("/api/settings/email-sender").catch(()=>({})),api("/api/settings/reminders").catch(()=>({channels:{},recent:[],counts:{},sender_verified:false,send_time:"09:00",daily_limit:20,emi_plan:{stages:[],repeat_days:0,repeat_after:10}})),api("/api/settings/razorpay").catch(()=>({})),api("/api/settings/ai-provider").catch(()=>({}))]).then(([people,auditRows,sender,automation,razorpay,aiProvider])=>{
+  return Promise.all([api("/api/team").catch(()=>state.team||[]),api("/api/audit").catch(()=>[]),api("/api/settings/email-sender").catch(()=>({})),api("/api/settings/reminders").catch(()=>({channels:{},recent:[],counts:{},sender_verified:false,send_time:"09:00",daily_limit:20,emi_plan:{stages:[],repeat_days:0,repeat_after:10}})),api("/api/settings/razorpay").catch(()=>({})),api("/api/settings/ai-provider").catch(()=>({}))]).then(([people,auditRows,sender,automation,razorpay,aiProvider])=>{
     if(generation!==navigationGeneration)return;
     state.team=people;const active=people.filter(p=>p.active),inactive=people.length-active.length,managerCount=active.filter(p=>p.role==="manager").length,employeeCount=active.filter(p=>p.role==="employee").length;
     const owner=state.user||{},senderStatus=sender.verified?"SMTP verified":sender.configured?"Setup saved · connection test needed":"Not configured";
