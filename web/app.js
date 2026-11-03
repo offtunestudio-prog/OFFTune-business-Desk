@@ -1496,7 +1496,7 @@ function renderSettings(){
           <label>Provider<select data-route-provider>${aiProviderOptions(route.provider||aiProvider.provider||"openrouter")}</select></label>
           <label>Text model ID<input data-route-model list="ai-model-catalog-${esc(route.id)}" value="${esc(route.model||aiProvider.model||"")}" maxlength="200" placeholder="Choose a provider model or enter its ID"></label>
           <label class="ai-route-endpoint ${(route.provider||aiProvider.provider)!=="custom"?"hidden":""}">API address<input type="url" data-route-endpoint value="${esc(route.base_url||"")}" maxlength="500" placeholder="https://api.example.com/v1"></label>
-          <label>Key source<select data-route-key-mode><option value="shared" ${route.use_own_key?"":"selected"}>Use saved provider key</option><option value="own" ${route.use_own_key?"selected":""}>Use a separate key for this area</option></select></label>
+          <label>Key source<select data-route-key-mode><option value="shared" ${route.use_own_key?"":"selected"}>Use saved provider key</option><option value="own" ${route.use_own_key?"selected":""}>Use a separate key for this area</option></select><small data-route-key-status>${aiProvider.connections?.[route.provider||aiProvider.provider||"openrouter"]?"A saved key is available for this provider.":"No shared key is saved for this provider yet."}</small></label>
           <datalist id="ai-model-catalog-${esc(route.id)}"></datalist><label class="ai-route-key ${route.use_own_key?"":"hidden"}" data-route-key-wrap>Area API key<input type="password" data-route-key autocomplete="new-password" maxlength="500" placeholder="${route.key_override_set?"Saved securely · leave blank to keep":"Paste key for this area"}"></label>
         </div>
       </article>`;
@@ -1573,7 +1573,9 @@ function renderSettings(){
       if(enabled?.checked&&provider&&routeCatalog)loadModelSuggestions(provider.value,routeCatalog);
       enabled?.addEventListener("change",()=>{fields?.classList.toggle("hidden",!enabled.checked);if(enabled.checked&&provider&&routeCatalog&&!routeCatalog.options.length)loadModelSuggestions(provider.value,routeCatalog);});
       provider?.addEventListener("change",()=>{endpointLabel?.classList.toggle("hidden",provider.value!=="custom");if(model)model.value="";loadModelSuggestions(provider.value,routeCatalog);});
-      keyMode?.addEventListener("change",()=>keyWrap?.classList.toggle("hidden",keyMode.value!=="own"));
+      const keyStatus=row.querySelector("[data-route-key-status]"),updateRouteKey=()=>{const own=keyMode?.value==="own";keyWrap?.classList.toggle("hidden",!own);if(keyStatus)keyStatus.textContent=own?"This area uses its own encrypted key.":(aiProvider.connections?.[provider?.value]?"A saved key is available for this provider.":"No shared key is saved for this provider yet.");};
+      provider?.addEventListener("change",updateRouteKey);
+      keyMode?.addEventListener("change",updateRouteKey);
     });
     $("#ai-provider-form").onsubmit=async event=>{
       event.preventDefault();const form=event.currentTarget,model=form.elements.model.value.trim();
@@ -1594,6 +1596,7 @@ function renderSettings(){
           item.base_url=row.querySelector("[data-route-endpoint]")?.value.trim()||"";
           item.use_own_key=row.querySelector("[data-route-key-mode]").value==="own";
           item.api_key=row.querySelector("[data-route-key]").value.trim();
+          if(!item.use_own_key&&!aiProvider.connections?.[item.provider]){toast("Save a shared API key for "+item.provider+" first, or choose a separate key for this area",true);row.querySelector("[data-route-key-mode]").focus();return;}
           if(!item.model){toast("Enter a model ID for "+row.querySelector(".ai-route-summary strong").textContent,true);row.querySelector("[data-route-model]").focus();return;}
           if(item.use_own_key&&!item.api_key&&!row.dataset.keySaved){toast("Add a separate key or choose the saved provider key",true);row.querySelector("[data-route-key]")?.focus();return;}
           if(item.provider==="custom"&&!item.base_url){toast("Enter the API address for "+row.querySelector(".ai-route-summary strong").textContent,true);row.querySelector("[data-route-endpoint]")?.focus();return;}
