@@ -1056,17 +1056,21 @@ function renderIncentives() {
     if(content)content.innerHTML=`<section class="panel notice error"><strong>Incentive data could not load.</strong><p>${esc(e.message)}</p><button type="button" class="button secondary" data-action="retry-incentives">Try again</button></section>`;
   });
 }
-async function renderInvoices() {
+async async function renderInvoices() {
   const generation=navigationGeneration;
   try {
-    const invs=await api("/api/invoices");if(generation!==navigationGeneration)return;state.invoices=invs;
+    const manager=state.user.role==="manager",employee=state.user.role==="employee",owner=state.user.role==="owner",canManageInvoices=owner||manager;
+    const [invs,reminderConfig,invoiceTemplate]=await Promise.all([
+      api("/api/invoices"),
+      canManageInvoices?api("/api/settings/reminders"):Promise.resolve(null),
+      canManageInvoices?api("/api/invoice/template"):Promise.resolve(null)
+    ]);
+    if(generation!==navigationGeneration)return;
+    state.invoices=invs;
     const amount=value=>Number(String(value||0).replace(/[^0-9.-]/g,""))||0;
     const activeCurrency=state.settings.currency||invs[0]?.currency||"INR",current=invs.filter(i=>(i.currency||activeCurrency)===activeCurrency),otherCurrencies=invs.length-current.length;
     const accountInvoices=current.filter(i=>i.invoice_kind!=="installment");
     const total=accountInvoices.reduce((n,i)=>n+amount(i.total),0),received=accountInvoices.reduce((n,i)=>n+amount(i.received),0),balance=accountInvoices.reduce((n,i)=>n+amount(i.balance),0);
-    const manager=state.user.role==="manager",employee=state.user.role==="employee",owner=state.user.role==="owner",canManageInvoices=owner||manager;
-    const [reminderConfig,invoiceTemplate]=canManageInvoices?await Promise.all([api("/api/settings/reminders"),api("/api/invoice/template")]):[null,null];
-    if(generation!==navigationGeneration)return;
     if(invoiceTemplate)state.settings={...state.settings,...invoiceTemplate};
     const invoiceReminderEmailsActive=Boolean(reminderConfig?.channels?.email_invoice_enabled);
     const emiPlan=reminderConfig?.emi_plan||{stages:[{offset_days:-5,label:"5 days before",subject:"Upcoming payment · {order_no}",body:"Hello {student}, your installment of {amount_due} is due on {due_date}. Please plan your payment."},{offset_days:-1,label:"1 day before",subject:"Payment due tomorrow · {order_no}",body:"Hello {student}, your installment of {amount_due} is due tomorrow ({due_date}). Please make the payment on time."},{offset_days:0,label:"Due today",subject:"Payment due today · {order_no}",body:"Hello {student}, your installment of {amount_due} is due today ({due_date}). Please pay today or contact our team if you need help."},{offset_days:3,label:"3 days overdue",subject:"Missed installment · {order_no}",body:"Please pay now to avoid any late fee that may apply under your agreement."},{offset_days:5,label:"5 days overdue",subject:"Payment follow-up · {order_no}",body:"Please arrange payment now to avoid possible interruption under your enrollment terms."}],repeat_days:0,repeat_after:10};
