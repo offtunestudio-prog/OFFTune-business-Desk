@@ -1,7 +1,13 @@
 const state = { user: null, csrf: null, workspacePreview:false, workspaceOwnerName:"", teamMessages:[], messagePollTimer:null, designations:[], accessFeatures:[], dataAccessOptions:[], page: "overview", overviewPreset:"30d", overviewFrom:"", overviewTo:"", targetsMonth:"", targetData:null, collectionView:"all", collectionBatch:"all", collectionCourse:"all", financeSection:"overview", financeDays:30, financePastDueDays:30, financeUpcomingDays:30, followupFilter:"action", followupDetailOpen:null, collectionDueView:"month", collectionDueMonth:"", incentiveView:"overview", incentivePerson:null, incentivePayoutFilter:"unpaid", incentiveFrom:"", incentiveTo:"", incentiveDueFrom:"", incentiveDueTo:"", incentiveRules:{pool_rate:5,rep_rate:2,manager_rate:3,payout_due_days:30}, reportMonths:12, reportRange:"30d", reportFrom:"", reportTo:"", reportGroup:"day", data: {}, settings: {}, products: [], batches: [], orders: [], installments: [], team: [] };
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
-const money = (n) => n===undefined||n===null?"Hidden":new Intl.NumberFormat("en-IN", { style: "currency", currency: state.settings.currency || "INR", maximumFractionDigits: 2 }).format(Number(n || 0));
+const moneyFormatters = new Map();
+const money = (n) => {
+  if (n===undefined||n===null) return "Hidden";
+  const currency=state.settings.currency||"INR";
+  if (!moneyFormatters.has(currency)) moneyFormatters.set(currency,new Intl.NumberFormat("en-IN", { style: "currency", currency, maximumFractionDigits: 2 }));
+  return moneyFormatters.get(currency).format(Number(n||0));
+};
 const canViewData = (key) => state.user?.role==="owner" || (state.user?.data_permissions||[]).includes(key);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 const day = (s) => s ? new Date(`${s}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "—";
@@ -9,13 +15,28 @@ const today = () => { const d=new Date(); return `${d.getFullYear()}-${String(d.
 const addMonthsIso = (iso, count) => { const [y,m,d]=String(iso||today()).split("-").map(Number); const first=new Date(y,m-1+count,1); const last=new Date(first.getFullYear(),first.getMonth()+1,0).getDate(); return `${first.getFullYear()}-${String(first.getMonth()+1).padStart(2,"0")}-${String(Math.min(d,last)).padStart(2,"0")}`; };
 const titleCase = (s) => String(s || "").replaceAll("_", " ").replace(/\b\w/g, x => x.toUpperCase());
 
+const readCache=new Map();
 async function api(path, options = {}) {
-  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
-  if (state.csrf && options.method && options.method !== "GET") headers["X-CSRF-Token"] = state.csrf;
-  const res = await fetch(path, { ...options, headers, credentials: "same-origin" });
-  const payload = res.status === 204 ? {} : await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(payload.error || "Something went wrong");
-  return payload;
+  const method=String(options.method||"GET").toUpperCase();
+  const cacheable=method==="GET"&&path.startsWith("/api/")&&!path.startsWith("/api/auth/")&&path!=="/api/backup";
+  if(method!=="GET") readCache.clear();
+  if(cacheable){
+    const cached=readCache.get(path);
+    if(cached&&cached.expires>Date.now()) return structuredClone(await cached.promise);
+  }
+  const request=(async()=>{
+    const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+    if (state.csrf && method!=="GET") headers["X-CSRF-Token"] = state.csrf;
+    const res = await fetch(path, { ...options, headers, credentials: "same-origin" });
+    const payload = res.status === 204 ? {} : await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(payload.error || "Something went wrong");
+    return payload;
+  })();
+  if(!cacheable) return request;
+  const entry={promise:request,expires:Infinity};
+  readCache.set(path,entry);
+  request.then(()=>{if(readCache.get(path)===entry)entry.expires=Date.now()+10000;},()=>{if(readCache.get(path)===entry)readCache.delete(path);});
+  return structuredClone(await request);
 }
 const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body) });
 
@@ -115,6 +136,7 @@ function showAuth(setup) {
   };
 }
 async function enterApp() {
+  readCache.clear();
   $("#auth-screen").classList.add("hidden"); $("#app-shell").classList.remove("hidden");
   $("#app-shell").classList.toggle("role-manager",state.user.role==="manager");
   $("#app-shell").classList.toggle("role-employee",state.user.role==="employee");
@@ -124,9 +146,14 @@ async function enterApp() {
   const common = loadCommon();
   const settings = state.user.role === "owner" ? api("/api/settings").catch(() => ({})) : Promise.resolve(state.settings);
   const incentiveRules = ["owner","manager"].includes(state.user.role) ? api("/api/incentive/settings").catch(() => state.incentiveRules) : Promise.resolve(state.incentiveRules);
-  [state.settings, state.incentiveRules] = await Promise.all([settings, incentiveRules]);
+  const range=overviewRange(state.overviewPreset);
+  const [profile,rules,dashboard,overview,targetCourses]=await Promise.all([
+    settings,incentiveRules,api("/api/dashboard"),loadOverviewData(range.from,range.to),
+    state.user.role==="employee"?api("/api/targets/self?month="+encodeURIComponent(today().slice(0,7))).catch(()=>({courses:[]})):Promise.resolve(null)
+  ]);
+  state.settings=profile;state.incentiveRules=rules;
   applyBrandLogo(state.settings.invoice_logo_data||"");
-  await common; renderNav(); await navigate("overview"); startMessagePolling();
+  await common; renderNav(); await navigate("overview",{dashboard,overview,targetCourses,range}); startMessagePolling();
   api("/api/team/messages").then(messages=>{state.teamMessages=messages;updateNotificationUI();}).catch(()=>{});
 }
 function updateNotificationUI(){
@@ -203,7 +230,7 @@ function renderNav() {
   updateNotificationUI();
   $$("#nav [data-page]").forEach(n => n.onclick = () => navigate(n.dataset.page));
 }
-async function navigate(page) {
+async function navigate(page,initial=null) {
   const permissionKey=page==="my-goals"?"targets":page;
   if(state.user?.role!=="owner"&&page!=="overview"&&!(state.user?.permissions||[]).includes(permissionKey)){toast("This feature is not enabled for your designation",true);page="overview";}
   state.page = page; renderNav();
@@ -212,11 +239,11 @@ async function navigate(page) {
   $("#content").innerHTML = `<div class="loading"><span></span>Loading your workspace</div>`;
   try {
     const needsDashboard = page === "overview" || page === "team";
-    const range = page === "overview" ? overviewRange(state.overviewPreset) : null;
+    const range = page === "overview" ? initial?.range||overviewRange(state.overviewPreset) : null;
     const [freshDashboard, overview, targetCourses, messages] = await Promise.all([
-      needsDashboard ? api("/api/dashboard") : Promise.resolve(null),
-      range ? loadOverviewData(range.from,range.to) : Promise.resolve(null),
-      range && state.user.role === "employee" ? api("/api/targets/self?month="+encodeURIComponent(today().slice(0,7))).catch(()=>({courses:[]})) : Promise.resolve(null),
+      needsDashboard ? initial?.dashboard||api("/api/dashboard") : Promise.resolve(null),
+      range ? initial?.overview||loadOverviewData(range.from,range.to) : Promise.resolve(null),
+      range && state.user.role === "employee" ? initial?.targetCourses||api("/api/targets/self?month="+encodeURIComponent(today().slice(0,7))).catch(()=>({courses:[]})) : Promise.resolve(null),
       page === "messages" ? api("/api/team/messages") : Promise.resolve(null)
     ]);
     const d = freshDashboard || state.data.dashboard || {role:state.user.role};
