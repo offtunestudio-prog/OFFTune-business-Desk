@@ -17,7 +17,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from js import Object, Uint8Array, crypto
 from pyodide.ffi import to_js
-from workers import asgi
+from workers import asgi, fetch
 
 
 app = FastAPI()
@@ -3513,6 +3513,7 @@ AI_PROVIDER_URLS = {
     "google": "https://generativelanguage.googleapis.com/v1beta/openai",
 }
 AI_ACTION_ROUTES = {
+    "open_section": ("/api/ai/status", "GET"),
     "record_sale": ("/api/orders", "POST"),
     "record_payment": ("/api/payments", "POST"),
     "create_invoice": ("/api/invoices", "POST"),
