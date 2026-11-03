@@ -1570,8 +1570,8 @@ function renderSettings(){
     if(providerChoice)loadModelSuggestions(providerChoice.value);
     $$("[data-ai-route]",$("#ai-routing-form")||document).forEach(row=>{
       const enabled=row.querySelector("[data-route-enabled]"),fields=row.querySelector("[data-route-fields]"),provider=row.querySelector("[data-route-provider]"),model=row.querySelector("[data-route-model]"),endpoint=row.querySelector("[data-route-endpoint]"),endpointLabel=row.querySelector(".ai-route-endpoint"),keyMode=row.querySelector("[data-route-key-mode]"),keyWrap=row.querySelector("[data-route-key-wrap]"),routeCatalog=row.querySelector("datalist");
-      if(provider&&routeCatalog)loadModelSuggestions(provider.value,routeCatalog);
-      enabled?.addEventListener("change",()=>fields?.classList.toggle("hidden",!enabled.checked));
+      if(enabled?.checked&&provider&&routeCatalog)loadModelSuggestions(provider.value,routeCatalog);
+      enabled?.addEventListener("change",()=>{fields?.classList.toggle("hidden",!enabled.checked);if(enabled.checked&&provider&&routeCatalog&&!routeCatalog.options.length)loadModelSuggestions(provider.value,routeCatalog);});
       provider?.addEventListener("change",()=>{endpointLabel?.classList.toggle("hidden",provider.value!=="custom");if(model)model.value="";loadModelSuggestions(provider.value,routeCatalog);});
       keyMode?.addEventListener("change",()=>keyWrap?.classList.toggle("hidden",keyMode.value!=="own"));
     });
