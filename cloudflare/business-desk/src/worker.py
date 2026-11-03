@@ -3619,10 +3619,12 @@ async def _ai_routing_map(db):
 
 def _ai_model_matches_provider(provider, model):
     model = str(model or "").strip().lower()
+    if model.startswith("models/"):
+        model = model[7:]
     if not model:
         return False
     if provider == "google":
-        return model.startswith(("models/", "gemini-"))
+        return model.startswith(("gemini-", "gemma-"))
     if provider == "openai":
         return not model.startswith(("models/", "gemini-", "openrouter/", "anthropic/", "x-ai/"))
     return True
@@ -3638,6 +3640,8 @@ async def _ai_config(request, segment=None):
     if provider not in (*AI_PROVIDER_URLS.keys(), "custom"):
         provider = "openrouter"
     model = str((route or {}).get("model") or values["ai_model"]).strip()
+    if provider == "google" and model.lower().startswith("models/"):
+        model = model[7:]
     custom_url = (route or {}).get("base_url") if route else (values["ai_base_url"] if provider == "custom" else "")
     base_url = _ai_base_url(provider, custom_url or "")
     segment_key_name = "ai_api_key_enc__segment_" + str(segment) if segment in AI_SEGMENTS else ""
@@ -3708,6 +3712,8 @@ async def save_ai_routing(request: Request):
                 continue
             provider = str(item.get("provider") or "").strip().lower()
             model = str(item.get("model") or "").strip()
+            if provider == "google" and model.lower().startswith("models/"):
+                model = model[7:]
             base_url = _ai_base_url(provider, item.get("base_url", ""))
             if not model or len(model) > 200 or any(ord(ch) < 32 for ch in model):
                 raise ValueError("Enter a model ID for " + AI_SEGMENTS[segment])
@@ -3767,6 +3773,8 @@ async def save_ai_provider(request: Request):
         provider = str(data.get("provider") or "openrouter").strip().lower()
         base_url = _ai_base_url(provider, data.get("base_url", ""))
         model = str(data.get("model") or "").strip()
+        if provider == "google" and model.lower().startswith("models/"):
+            model = model[7:]
         if not model or len(model) > 200 or any(ord(ch) < 32 for ch in model):
             raise ValueError("Enter a valid model ID")
         if not _ai_model_matches_provider(provider, model):
@@ -3833,6 +3841,8 @@ async def get_ai_models(request: Request):
                 raw_models = payload.get("data", []) if isinstance(payload, dict) else []
                 for model in raw_models[:500]:
                     mid = str(model.get("id") or "").strip()
+                    if provider == "google" and mid.startswith("models/"):
+                        mid = mid[7:]
                     if not mid:
                         continue
                     name = str(model.get("name") or mid)[:180]
