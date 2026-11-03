@@ -5,6 +5,9 @@ compatibility_flags = ["python_workers"]
 workers_dev = true
 preview_urls = false
 
+[placement]
+mode = "smart"
+
 [assets]
 directory = "../../web"
 binding = "ASSETS"
