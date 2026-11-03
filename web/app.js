@@ -145,11 +145,11 @@ async function enterApp() {
   $("#role-label").textContent = `${state.user.designation||state.user.job_title||titleCase(state.user.role)} workspace`;
   const preview=$("#workspace-preview-banner"); if(preview){preview.classList.toggle("hidden",!state.workspacePreview);preview.innerHTML=state.workspacePreview?`<span><strong>Previewing ${esc(state.user.name)}’s ${esc(state.user.job_title||titleCase(state.user.role))} workspace</strong><small>Signed in as ${esc(state.workspaceOwnerName)} · Changes here use this team member’s access.</small></span><button type="button" class="button small secondary" id="return-owner-workspace">Return to owner workspace</button>`:"";$("#return-owner-workspace")?.addEventListener("click",async()=>{try{await post("/api/team/preview/end",{});location.reload();}catch(e){toast(e.message,true);}});}
   const common=loadCommon().then(()=>{
-    if(state.page==="overview"&&state.data.dashboard)renderDashboard(state.data.dashboard);
+    if(state.page==="overview"&&state.data.dashboard?.overview)renderDashboard(state.data.dashboard);
   });
   state.commonPromise=common;
   const settingsPromise=state.user.role==="owner"
-    ?api("/api/settings").catch(()=>({})).then(value=>{state.settings=value;applyBrandLogo(value.invoice_logo_data||"");if(state.page==="overview"&&state.data.dashboard)renderDashboard(state.data.dashboard);return value;})
+    ?api("/api/settings").catch(()=>({})).then(value=>{state.settings=value;applyBrandLogo(value.invoice_logo_data||"");if(state.page==="overview"&&state.data.dashboard?.overview)renderDashboard(state.data.dashboard);return value;})
     :Promise.resolve(state.settings);
   const incentiveRulesPromise=["owner","manager"].includes(state.user.role)
     ?api("/api/incentive/settings").catch(()=>state.incentiveRules).then(value=>{state.incentiveRules=value;return value;})
