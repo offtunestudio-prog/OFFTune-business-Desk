@@ -144,19 +144,24 @@ async function enterApp() {
   renderAccountAvatar();
   $("#role-label").textContent = `${state.user.designation||state.user.job_title||titleCase(state.user.role)} workspace`;
   const preview=$("#workspace-preview-banner"); if(preview){preview.classList.toggle("hidden",!state.workspacePreview);preview.innerHTML=state.workspacePreview?`<span><strong>Previewing ${esc(state.user.name)}’s ${esc(state.user.job_title||titleCase(state.user.role))} workspace</strong><small>Signed in as ${esc(state.workspaceOwnerName)} · Changes here use this team member’s access.</small></span><button type="button" class="button small secondary" id="return-owner-workspace">Return to owner workspace</button>`:"";$("#return-owner-workspace")?.addEventListener("click",async()=>{try{await post("/api/team/preview/end",{});location.reload();}catch(e){toast(e.message,true);}});}
-  const common = loadCommon().then(()=>{
+  const common=loadCommon().then(()=>{
     if(state.page==="overview"&&state.data.dashboard)renderDashboard(state.data.dashboard);
   });
   state.commonPromise=common;
-  const settings = state.user.role === "owner" ? api("/api/settings").catch(() => ({})) : Promise.resolve(state.settings);
-  const incentiveRules = ["owner","manager"].includes(state.user.role) ? api("/api/incentive/settings").catch(() => state.incentiveRules) : Promise.resolve(state.incentiveRules);
+  const settingsPromise=state.user.role==="owner"
+    ?api("/api/settings").catch(()=>({})).then(value=>{state.settings=value;applyBrandLogo(value.invoice_logo_data||"");if(state.page==="overview"&&state.data.dashboard)renderDashboard(state.data.dashboard);return value;})
+    :Promise.resolve(state.settings);
+  const incentiveRulesPromise=["owner","manager"].includes(state.user.role)
+    ?api("/api/incentive/settings").catch(()=>state.incentiveRules).then(value=>{state.incentiveRules=value;return value;})
+    :Promise.resolve(state.incentiveRules);
+  state.settingsPromise=settingsPromise;
+  state.incentiveRulesPromise=incentiveRulesPromise;
   const range=overviewRange(state.overviewPreset);
-  const [profile,rules,dashboard,overview,targetCourses]=await Promise.all([
-    settings,incentiveRules,api("/api/dashboard"),loadOverviewData(range.from,range.to),
+  const [dashboard,overview,targetCourses]=await Promise.all([
+    api("/api/dashboard"),loadOverviewData(range.from,range.to),
     state.user.role==="employee"?api("/api/targets/self?month="+encodeURIComponent(today().slice(0,7))).catch(()=>({courses:[]})):Promise.resolve(null)
   ]);
-  state.settings=profile;state.incentiveRules=rules;
-  applyBrandLogo(state.settings.invoice_logo_data||"");
+  state.data.dashboard=dashboard;
   renderNav(); await navigate("overview",{dashboard,overview,targetCourses,range}); startMessagePolling();
   api("/api/team/messages").then(messages=>{state.teamMessages=messages;updateNotificationUI();}).catch(()=>{});
 }
@@ -251,7 +256,8 @@ async function navigate(page,initial=null) {
   },initial?300:650);
   try {
     const commonDependencies={products:["products"],batches:["batches","orders"],analytics:["products","batches","orders"],collections:["products","batches","orders","team"],followup:["orders"],incentives:["orders"],team:["team"],reports:["orders"],settings:["team"]}[page]||[];
-    await Promise.all(commonDependencies.map(key=>state.commonDataPromises?.[key]).filter(Boolean));
+    const deferredDependencies=page==="settings"?[state.settingsPromise]:page==="incentives"?[state.incentiveRulesPromise]:[];
+    await Promise.all([...commonDependencies.map(key=>state.commonDataPromises?.[key]),...deferredDependencies].filter(Boolean));
     const needsDashboard = page === "overview" || page === "team";
     const range = page === "overview" ? initial?.range||overviewRange(state.overviewPreset) : null;
     const [freshDashboard, overview, targetCourses, messages] = await Promise.all([
