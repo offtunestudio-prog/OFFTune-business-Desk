@@ -16,11 +16,12 @@ const addMonthsIso = (iso, count) => { const [y,m,d]=String(iso||today()).split(
 const titleCase = (s) => String(s || "").replaceAll("_", " ").replace(/\b\w/g, x => x.toUpperCase());
 
 const readCache=new Map();
+const pageSnapshots=new Map();
 let navigationGeneration=0;
 async function api(path, options = {}) {
   const method=String(options.method||"GET").toUpperCase();
   const cacheable=method==="GET"&&path.startsWith("/api/")&&!path.startsWith("/api/auth/")&&path!=="/api/backup";
-  if(method!=="GET") readCache.clear();
+  if(method!=="GET"){readCache.clear();pageSnapshots.clear();}
   if(cacheable){
     const cached=readCache.get(path);
     if(cached&&cached.expires>Date.now()) return structuredClone(await cached.promise);
@@ -138,6 +139,7 @@ function showAuth(setup) {
 }
 async function enterApp() {
   readCache.clear();
+  pageSnapshots.clear();
   $("#auth-screen").classList.add("hidden"); $("#app-shell").classList.remove("hidden");
   $("#app-shell").classList.toggle("role-manager",state.user.role==="manager");
   $("#app-shell").classList.toggle("role-employee",state.user.role==="employee");
@@ -167,6 +169,23 @@ async function enterApp() {
   await navigate("overview",initial);
   startMessagePolling();
   api("/api/team/messages").then(messages=>{state.teamMessages=messages;updateNotificationUI();}).catch(()=>{});
+  warmWorkspaceRoutes();
+}
+async function warmWorkspaceRoutes(){
+  const role=state.user?.role,permissions=new Set(state.user?.permissions||[]);
+  const can=page=>role==="owner"||permissions.has(page);
+  const routes=["/api/payments","/api/installments","/api/invoices","/api/team/messages"];
+  if(can("collections"))routes.push("/api/analytics/batches","/api/analytics/courses");
+  if(can("followup"))routes.push("/api/followup/settings");
+  if(can("analytics"))routes.push("/api/analytics/courses");
+  if(can("incentives"))routes.push("/api/commissions","/api/commissions/payouts");
+  if(can("expenses"))routes.push("/api/expenses");
+  if(role==="owner")routes.push("/api/team/designations","/api/invoice/template","/api/settings/reminders","/api/audit","/api/settings/email-sender","/api/settings/razorpay","/api/settings/ai-provider","/api/settings/ai-models");
+  if(role==="manager")routes.push("/api/incentive/team-rules");
+  if(["owner","manager"].includes(role))routes.push("/api/targets?month="+encodeURIComponent(today().slice(0,7)));
+  for(let i=0;i<routes.length;i+=4){
+    await Promise.allSettled(routes.slice(i,i+4).map(path=>api(path)));
+  }
 }
 function updateNotificationUI(){
   const button=$("#notification-bell"),badge=$("#notification-count");
@@ -252,10 +271,15 @@ async function navigate(page,initial=null) {
   const meta = navItems().find(x => x.id === page); if (!meta) return;
   $("#page-title").textContent = meta.label;
   const content=$("#content");
+  const priorSnapshot=pageSnapshots.get(page);
   content.setAttribute("aria-busy","true");
   content.inert=true;
+  if(priorSnapshot){
+    content.innerHTML=`<div class="workspace-refreshing" role="status">Showing the last view while updating…</div>`+priorSnapshot;
+    content.classList.add("refreshing");
+  }else content.classList.remove("refreshing");
   const loadingTimer=setTimeout(()=>{
-    if(generation===navigationGeneration)content.innerHTML=`<div class="loading"><span></span>Loading your workspace</div>`;
+    if(generation===navigationGeneration&&!priorSnapshot)content.innerHTML=`<div class="loading"><span></span>Loading your workspace</div>`;
   },initial?300:650);
   try {
     const commonDependencies={products:["products"],batches:["batches","orders"],analytics:["products","batches","orders"],collections:["products","batches","orders","team"],followup:["orders"],incentives:["orders"],team:["team"],reports:["orders"],settings:["team"]}[page]||[];
@@ -298,10 +322,11 @@ async function navigate(page,initial=null) {
     else if (page === "team") await renderTeam(d);
     else if (page === "reports") await renderReports();
     else if (page === "settings") await renderSettings();
+    if(generation===navigationGeneration)pageSnapshots.set(page,content.innerHTML);
   } catch (e) { if(generation===navigationGeneration)content.innerHTML = `<div class="notice error">${esc(e.message)}</div>`; }
   finally {
     clearTimeout(loadingTimer);
-    if(generation===navigationGeneration){content.inert=false;content.removeAttribute("aria-busy");}
+    if(generation===navigationGeneration){content.classList.remove("refreshing");content.inert=false;content.removeAttribute("aria-busy");}
   }
 }
 
