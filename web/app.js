@@ -201,17 +201,15 @@ async function enterApp() {
 async function warmWorkspaceRoutes(){
   const role=state.user?.role,permissions=new Set(state.user?.permissions||[]);
   const can=page=>role==="owner"||permissions.has(page);
-  const routes=["/api/payments","/api/installments","/api/invoices","/api/team/messages"];
+  const routes=["/api/targets?month="+encodeURIComponent(today().slice(0,7)),"/api/payments","/api/installments","/api/invoices","/api/expenses","/api/commissions","/api/commissions/payouts","/api/team/messages"];
   if(can("collections"))routes.push("/api/analytics/batches","/api/analytics/courses");
   if(can("followup"))routes.push("/api/followup/settings");
   if(can("analytics"))routes.push("/api/analytics/courses");
-  if(can("incentives"))routes.push("/api/commissions","/api/commissions/payouts");
-  if(can("expenses"))routes.push("/api/expenses");
   if(role==="owner")routes.push("/api/team/designations","/api/invoice/template","/api/settings/reminders","/api/audit","/api/settings/email-sender","/api/settings/razorpay","/api/settings/ai-provider","/api/settings/ai-models");
   if(role==="manager")routes.push("/api/incentive/team-rules");
-  if(["owner","manager"].includes(role))routes.push("/api/targets?month="+encodeURIComponent(today().slice(0,7)));
-  for(let i=0;i<routes.length;i+=4){
-    await Promise.allSettled(routes.slice(i,i+4).map(path=>api(path)));
+  const unique=[...new Set(routes)];
+  for(let i=0;i<unique.length;i+=8){
+    await Promise.allSettled(unique.slice(i,i+8).map(path=>api(path)));
   }
 }
 function updateNotificationUI(){
@@ -290,6 +288,9 @@ function renderNav() {
   updateNotificationUI();
   $$("#nav [data-page]").forEach(n => n.onclick = () => navigate(n.dataset.page));
 }
+function workspaceSkeleton(){
+  return '<div class="workspace-skeleton" role="status" aria-label="Workspace content is opening"><span class="skeleton-bar wide"></span><span class="skeleton-bar medium"></span><div class="skeleton-grid"><span></span><span></span><span></span></div><span class="skeleton-bar short"></span><span class="skeleton-panel"></span></div>';
+}
 async function navigate(page,initial=null) {
   const permissionKey=page==="my-goals"?"targets":page;
   if(state.user?.role!=="owner"&&page!=="overview"&&!(state.user?.permissions||[]).includes(permissionKey)){toast("This feature is not enabled for your designation",true);page="overview";}
@@ -302,12 +303,12 @@ async function navigate(page,initial=null) {
   content.setAttribute("aria-busy","true");
   content.inert=true;
   if(priorSnapshot){
-    content.innerHTML=`<div class="workspace-refreshing" role="status">Showing the last view while updating…</div>`+priorSnapshot;
+    content.innerHTML="<div class=\"workspace-refreshing\" role=\"status\">Showing the last view while updating…</div>"+priorSnapshot;
     content.classList.add("refreshing");
-  }else content.classList.remove("refreshing");
-  const loadingTimer=setTimeout(()=>{
-    if(generation===navigationGeneration&&!priorSnapshot)content.innerHTML=`<div class="loading"><span></span>Loading your workspace</div>`;
-  },initial?300:650);
+  }else{
+    content.classList.remove("refreshing");
+    content.innerHTML=workspaceSkeleton();
+  }
   try {
     const commonDependencies={products:["products"],batches:["batches","orders"],analytics:["products","batches","orders"],collections:["products","batches","orders","team"],followup:["orders"],incentives:["orders"],team:["team"],reports:["orders"],settings:["team"]}[page]||[];
     const deferredDependencies=page==="settings"?[state.settingsPromise]:page==="incentives"?[state.incentiveRulesPromise]:[];
@@ -352,7 +353,6 @@ async function navigate(page,initial=null) {
     if(generation===navigationGeneration){pageSnapshots.set(page,content.innerHTML);persistPageSnapshots();}
   } catch (e) { if(generation===navigationGeneration)content.innerHTML = `<div class="notice error">${esc(e.message)}</div>`; }
   finally {
-    clearTimeout(loadingTimer);
     if(generation===navigationGeneration){content.classList.remove("refreshing");content.inert=false;content.removeAttribute("aria-busy");}
   }
 }
