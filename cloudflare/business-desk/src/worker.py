@@ -1,5 +1,6 @@
 """Cloudflare Worker entry point for OFFTune Business Desk."""
 
+import asyncio
 import hashlib
 import base64
 import binascii
@@ -235,20 +236,19 @@ async def health(request: Request):
 @app.get("/api/auth/session")
 async def auth_session(request: Request):
     db = _env(request).DB
-    count = await _first(db.prepare("SELECT COUNT(*) AS n FROM users"))
-    cookie = request.cookies.get("offtune_session")
-    if not cookie:
-        return {"setup_required": count["n"] == 0, "user": None, "csrf": None,
-                "workspace_preview": False, "owner_name": None}
+    cookie = request.cookies.get("offtune_session") or ""
     session = await _first(db.prepare(
-        "SELECT s.csrf,s.expires_at,s.act_as_user_id,owner.name owner_name,u.id,u.name,u.email,u.role,u.manager_id,u.job_title,"
-        "u.designation_id,u.avatar_data,d.name designation,d.permissions_json,d.data_permissions_json "
-        "FROM sessions s JOIN users owner ON owner.id=s.user_id "
-        "JOIN users u ON u.id=COALESCE(s.act_as_user_id,s.user_id) LEFT JOIN designations d ON d.id=u.designation_id "
-        "WHERE s.token_hash=? AND s.expires_at>? AND owner.is_active=1 AND u.is_active=1"
+        "SELECT (SELECT COUNT(*) FROM users) n,s.csrf,s.act_as_user_id,owner.name owner_name,"
+        "u.id,u.name,u.email,u.role,u.manager_id,u.job_title,u.designation_id,u.avatar_data,"
+        "d.name designation,d.permissions_json,d.data_permissions_json "
+        "FROM (SELECT 1) seed "
+        "LEFT JOIN sessions s ON s.token_hash=? AND s.expires_at>? "
+        "LEFT JOIN users owner ON owner.id=s.user_id AND owner.is_active=1 "
+        "LEFT JOIN users u ON u.id=COALESCE(s.act_as_user_id,s.user_id) AND u.is_active=1 AND owner.id IS NOT NULL "
+        "LEFT JOIN designations d ON d.id=u.designation_id"
     ).bind(hashlib.sha256(cookie.encode()).hexdigest(), int(time.time())))
-    if not session:
-        return {"setup_required": count["n"] == 0, "user": None, "csrf": None,
+    if not session or session["id"] is None:
+        return {"setup_required": session["n"] == 0, "user": None, "csrf": None,
                 "workspace_preview": False, "owner_name": None}
     default_permissions = list(ACCESS_FEATURES) if session["role"] == "owner" else DEFAULT_ROLE_ACCESS.get(session["role"], [])
     default_data_permissions = list(DATA_ACCESS_OPTIONS) if session["role"] == "owner" else DEFAULT_ROLE_DATA_ACCESS.get(session["role"], [])
@@ -2846,25 +2846,31 @@ async def dashboard_overview(request: Request):
     else:
         ids = [uid]
     clause, args = ("", []) if ids is None else (" AND o.employee_id IN (" + ",".join("?" for _ in ids) + ")", list(ids))
-    order_rows = _rows(await db.prepare("SELECT o.id,o.customer_id,o.total_minor,o.employee_id,o.order_no,o.order_date,o.enrollment_status,c.name student,COALESCE((SELECT SUM(CASE WHEN p.payment_type='receipt' THEN p.amount_minor ELSE -p.amount_minor END) FROM payments p WHERE p.order_id=o.id),0) received FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.status='active' AND o.order_date>=? AND o.order_date<?" + clause + " ORDER BY o.order_date DESC,o.id DESC").bind(start.isoformat(), end_exclusive, *args).all())
+    order_stmt = db.prepare("SELECT o.id,o.customer_id,o.total_minor,o.employee_id,o.order_no,o.order_date,o.enrollment_status,c.name student,COALESCE((SELECT SUM(CASE WHEN p.payment_type='receipt' THEN p.amount_minor ELSE -p.amount_minor END) FROM payments p WHERE p.order_id=o.id),0) received FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.status='active' AND o.order_date>=? AND o.order_date<?" + clause + " ORDER BY o.order_date DESC,o.id DESC").bind(start.isoformat(), end_exclusive, *args)
+    cash_clause, cash_args = ("", []) if ids is None else (" AND o.employee_id IN (" + ",".join("?" for _ in ids) + ")", list(ids))
+    cash_stmt = db.prepare("SELECT COALESCE(SUM(CASE WHEN p.payment_type='receipt' THEN p.amount_minor ELSE -p.amount_minor END),0) amount FROM payments p JOIN orders o ON o.id=p.order_id WHERE p.paid_on>=? AND p.paid_on<?" + cash_clause).bind(start.isoformat(), end_exclusive, *cash_args)
+    commission_clause, commission_args = ("", []) if ids is None else (" AND e.employee_id IN (" + ",".join("?" for _ in ids) + ")", list(ids))
+    commission_stmt = db.prepare("SELECT COALESCE(SUM(e.amount_minor),0) earned,COALESCE(SUM(e.amount_minor-e.paid_minor),0) due FROM commission_events e JOIN payments p ON p.id=e.payment_id JOIN orders o ON o.id=e.order_id WHERE p.paid_on>=? AND p.paid_on<?" + commission_clause).bind(start.isoformat(), end_exclusive, *commission_args)
+    payout_stmt = db.prepare("SELECT COALESCE(SUM(amount_minor),0) amount FROM commission_payouts WHERE paid_on>=? AND paid_on<?" + (" AND employee_id IN (" + ",".join("?" for _ in ids) + ")" if ids is not None else "")).bind(start.isoformat(), end_exclusive, *(ids or []))
+    order_result, cash, commission, payout = await asyncio.gather(
+        order_stmt.all(), _first(cash_stmt), _first(commission_stmt), _first(payout_stmt)
+    )
+    order_rows = _rows(order_result)
     conversions, students = len(order_rows), len({row["customer_id"] for row in order_rows})
     outstanding = sum(max(0, int(row["total_minor"] or 0) - int(row["received"] or 0)) for row in order_rows)
     students_to_collect = len({row["customer_id"] for row in order_rows if int(row["total_minor"] or 0) > int(row["received"] or 0)})
-    cash_clause, cash_args = ("", []) if ids is None else (" AND o.employee_id IN (" + ",".join("?" for _ in ids) + ")", list(ids))
-    cash = await _first(db.prepare("SELECT COALESCE(SUM(CASE WHEN p.payment_type='receipt' THEN p.amount_minor ELSE -p.amount_minor END),0) amount FROM payments p JOIN orders o ON o.id=p.order_id WHERE p.paid_on>=? AND p.paid_on<?" + cash_clause).bind(start.isoformat(), end_exclusive, *cash_args))
-    commission_clause, commission_args = ("", []) if ids is None else (" AND e.employee_id IN (" + ",".join("?" for _ in ids) + ")", list(ids))
-    commission = await _first(db.prepare("SELECT COALESCE(SUM(e.amount_minor),0) earned,COALESCE(SUM(e.amount_minor-e.paid_minor),0) due FROM commission_events e JOIN payments p ON p.id=e.payment_id JOIN orders o ON o.id=e.order_id WHERE p.paid_on>=? AND p.paid_on<?" + commission_clause).bind(start.isoformat(), end_exclusive, *commission_args))
-    payout = await _first(db.prepare("SELECT COALESCE(SUM(amount_minor),0) amount FROM commission_payouts WHERE paid_on>=? AND paid_on<?" + (" AND employee_id IN (" + ",".join("?" for _ in ids) + ")" if ids is not None else "")).bind(start.isoformat(), end_exclusive, *(ids or [])))
     result = {"role": role, "from": start.isoformat(), "to": end.isoformat(), "conversions": conversions, "students": students,
               "students_to_collect": students_to_collect, "outstanding": _money(outstanding),
               "incentive_earned": _money(commission["earned"]), "incentive_due": _money(max(0, int(commission["due"] or 0))),
               "incentive_recovery": _money(max(0, -int(commission["due"] or 0))), "incentive_paid": _money(payout["amount"])}
     if role == "owner":
         sales = sum(int(row["total_minor"] or 0) for row in order_rows)
-        expenses = await _first(db.prepare("SELECT COALESCE(SUM(amount_minor),0) amount FROM expenses WHERE spent_on>=? AND spent_on<?").bind(start.isoformat(), end_exclusive))
         monthly_trend = (end - start).days > 90
         trend_expr = "substr(p.paid_on,1,7)" if monthly_trend else "p.paid_on"
-        trend = _rows(await db.prepare(f"SELECT {trend_expr} day,COALESCE(SUM(CASE WHEN p.payment_type='receipt' THEN p.amount_minor ELSE -p.amount_minor END),0) amount FROM payments p WHERE p.paid_on>=? AND p.paid_on<? GROUP BY day ORDER BY day").bind(start.isoformat(), end_exclusive).all())
+        expenses_stmt = db.prepare("SELECT COALESCE(SUM(amount_minor),0) amount FROM expenses WHERE spent_on>=? AND spent_on<?").bind(start.isoformat(), end_exclusive)
+        trend_stmt = db.prepare(f"SELECT {trend_expr} day,COALESCE(SUM(CASE WHEN p.payment_type='receipt' THEN p.amount_minor ELSE -p.amount_minor END),0) amount FROM payments p WHERE p.paid_on>=? AND p.paid_on<? GROUP BY day ORDER BY day").bind(start.isoformat(), end_exclusive)
+        expenses, trend_result = await asyncio.gather(_first(expenses_stmt), trend_stmt.all())
+        trend = _rows(trend_result)
         for row in trend:
             row["label"] = date.fromisoformat(row["day"] + "-01" if monthly_trend else row["day"]).strftime("%b %y" if monthly_trend else "%d %b")
             row["amount"] = _money(row["amount"])
@@ -2881,16 +2887,29 @@ async def dashboard_overview(request: Request):
             return {"conversions": len(rows), "students": len({row["customer_id"] for row in rows}),
                     "students_to_collect": len({row["customer_id"] for row in open_orders}),
                     "outstanding": _money(sum(max(0, int(row["total_minor"] or 0)-int(row["received"] or 0)) for row in rows))}
-        mine = await count_scope([uid])
         team_ids = [member for member in ids if member != uid]
-        result.update({"scopes": {"mine": mine, "team": await count_scope(team_ids), "company": await count_scope(None)},
+        mine, team_scope, company_scope = await asyncio.gather(
+            count_scope([uid]), count_scope(team_ids), count_scope(None)
+        )
+        result.update({"scopes": {"mine": mine, "team": team_scope, "company": company_scope},
                        "team": [], "trend": []})
     else:
         own_orders = []
+        products_by_order = {}
+        if order_rows:
+            order_ids = [row["id"] for row in order_rows]
+            placeholders = ",".join("?" for _ in order_ids)
+            product_rows = await db.prepare(
+                "SELECT oi.order_id,p.name,COALESCE(b.name,'') batch FROM order_items oi JOIN products p ON p.id=oi.product_id "
+                "LEFT JOIN batches b ON b.id=oi.batch_id WHERE oi.order_id IN (" + placeholders + ") ORDER BY oi.order_id,oi.id"
+            ).bind(*order_ids).all()
+            for product in _rows(product_rows):
+                products_by_order.setdefault(product["order_id"], []).append(
+                    {"name": product["name"], "batch": product["batch"]}
+                )
         for row in order_rows:
-            products = _rows(await db.prepare("SELECT p.name,COALESCE(b.name,'') batch FROM order_items oi JOIN products p ON p.id=oi.product_id LEFT JOIN batches b ON b.id=oi.batch_id WHERE oi.order_id=? ORDER BY oi.id").bind(row["id"]).all())
             own_orders.append({"order_no": row["order_no"], "date": row["order_date"], "student": row["student"],
-                               "products": products, "stage": row["enrollment_status"],
+                               "products": products_by_order.get(row["id"], []), "stage": row["enrollment_status"],
                                "outstanding": _money(max(0, int(row["total_minor"] or 0)-int(row["received"] or 0)))})
         result["my_orders"] = own_orders
         result["trend"] = []
