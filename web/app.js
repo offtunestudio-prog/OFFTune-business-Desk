@@ -201,7 +201,8 @@ async function enterApp() {
 async function warmWorkspaceRoutes(){
   const role=state.user?.role,permissions=new Set(state.user?.permissions||[]);
   const can=page=>role==="owner"||permissions.has(page);
-  const routes=["/api/targets?month="+encodeURIComponent(today().slice(0,7)),"/api/payments","/api/installments","/api/invoices","/api/expenses","/api/commissions","/api/commissions/payouts","/api/team/messages"];
+  const settingsRoutes=role==="owner"?["/api/team","/api/audit","/api/settings/email-sender","/api/settings/reminders","/api/settings/razorpay","/api/settings/ai-provider"]:[];
+  const routes=[...settingsRoutes,"/api/targets?month="+encodeURIComponent(today().slice(0,7)),"/api/payments","/api/installments","/api/invoices","/api/expenses","/api/commissions","/api/commissions/payouts","/api/team/messages"];
   if(can("collections"))routes.push("/api/analytics/batches","/api/analytics/courses");
   if(can("followup"))routes.push("/api/followup/settings");
   if(can("analytics"))routes.push("/api/analytics/courses");
