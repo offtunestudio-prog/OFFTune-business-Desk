@@ -1494,10 +1494,10 @@ function renderSettings(){
         <div class="ai-route-summary"><div><strong>${esc(route.title)}</strong><small>${custom?"Customized model route":"Uses the shared default"}</small></div><label class="ai-route-toggle"><input type="checkbox" data-route-enabled ${custom?"checked":""}><span>Customize</span></label></div>
         <div class="ai-route-fields ${custom?"":"hidden"}" data-route-fields>
           <label>Provider<select data-route-provider>${aiProviderOptions(route.provider||aiProvider.provider||"openrouter")}</select></label>
-          <label>Text model ID<input data-route-model list="ai-model-catalog" value="${esc(route.model||aiProvider.model||"")}" maxlength="200" placeholder="Choose a provider model or enter its ID"></label>
+          <label>Text model ID<input data-route-model list="ai-model-catalog-${esc(route.id)}" value="${esc(route.model||aiProvider.model||"")}" maxlength="200" placeholder="Choose a provider model or enter its ID"></label>
           <label class="ai-route-endpoint ${(route.provider||aiProvider.provider)!=="custom"?"hidden":""}">API address<input type="url" data-route-endpoint value="${esc(route.base_url||"")}" maxlength="500" placeholder="https://api.example.com/v1"></label>
           <label>Key source<select data-route-key-mode><option value="shared" ${route.use_own_key?"":"selected"}>Use saved provider key</option><option value="own" ${route.use_own_key?"selected":""}>Use a separate key for this area</option></select></label>
-          <label class="ai-route-key ${route.use_own_key?"":"hidden"}" data-route-key-wrap>Area API key<input type="password" data-route-key autocomplete="new-password" maxlength="500" placeholder="${route.key_override_set?"Saved securely · leave blank to keep":"Paste key for this area"}"></label>
+          <datalist id="ai-model-catalog-${esc(route.id)}"></datalist><label class="ai-route-key ${route.use_own_key?"":"hidden"}" data-route-key-wrap>Area API key<input type="password" data-route-key autocomplete="new-password" maxlength="500" placeholder="${route.key_override_set?"Saved securely · leave blank to keep":"Paste key for this area"}"></label>
         </div>
       </article>`;
     }).join("");
@@ -1569,9 +1569,10 @@ function renderSettings(){
     });
     if(providerChoice)loadModelSuggestions(providerChoice.value);
     $$("[data-ai-route]",$("#ai-routing-form")||document).forEach(row=>{
-      const enabled=row.querySelector("[data-route-enabled]"),fields=row.querySelector("[data-route-fields]"),provider=row.querySelector("[data-route-provider]"),model=row.querySelector("[data-route-model]"),endpoint=row.querySelector("[data-route-endpoint]"),endpointLabel=row.querySelector(".ai-route-endpoint"),keyMode=row.querySelector("[data-route-key-mode]"),keyWrap=row.querySelector("[data-route-key-wrap]");
+      const enabled=row.querySelector("[data-route-enabled]"),fields=row.querySelector("[data-route-fields]"),provider=row.querySelector("[data-route-provider]"),model=row.querySelector("[data-route-model]"),endpoint=row.querySelector("[data-route-endpoint]"),endpointLabel=row.querySelector(".ai-route-endpoint"),keyMode=row.querySelector("[data-route-key-mode]"),keyWrap=row.querySelector("[data-route-key-wrap]"),routeCatalog=row.querySelector("datalist");
+      if(provider&&routeCatalog)loadModelSuggestions(provider.value,routeCatalog);
       enabled?.addEventListener("change",()=>fields?.classList.toggle("hidden",!enabled.checked));
-      provider?.addEventListener("change",()=>{endpointLabel?.classList.toggle("hidden",provider.value!=="custom");if(model)model.value="";});
+      provider?.addEventListener("change",()=>{endpointLabel?.classList.toggle("hidden",provider.value!=="custom");if(model)model.value="";loadModelSuggestions(provider.value,routeCatalog);});
       keyMode?.addEventListener("change",()=>keyWrap?.classList.toggle("hidden",keyMode.value!=="own"));
     });
     $("#ai-provider-form").onsubmit=async event=>{
