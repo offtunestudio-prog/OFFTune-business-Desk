@@ -3512,6 +3512,13 @@ AI_PROVIDER_URLS = {
     "openai": "https://api.openai.com/v1",
     "google": "https://generativelanguage.googleapis.com/v1beta/openai",
 }
+AI_SEGMENTS = {
+    "overview": "Overview", "targets": "Targets", "collections": "Finance Desk",
+    "followup": "Follow-up", "products": "Products", "incentives": "Incentives",
+    "invoices": "Invoices", "team": "Team access", "reports": "Reports",
+    "batches": "Batches", "analytics": "Course analytics", "messages": "Messages",
+    "expenses": "Expenses", "settings": "Settings",
+}
 AI_ACTION_ROUTES = {
     "open_section": ("/api/ai/status", "GET"),
     "record_sale": ("/api/orders", "POST"),
@@ -3599,24 +3606,133 @@ async def _ai_decrypt(request, value):
     return Uint8Array.new(plaintext).to_py().tobytes().decode("utf-8")
 
 
-async def _ai_config(request):
+async def _ai_routing_map(db):
+    raw = await _setting(db, "ai_segment_routing", "{}")
+    try:
+        parsed = json.loads(raw or "{}")
+    except (ValueError, TypeError):
+        parsed = {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {key: value for key, value in parsed.items() if key in AI_SEGMENTS and isinstance(value, dict)}
+
+
+def _ai_model_matches_provider(provider, model):
+    model = str(model or "").strip().lower()
+    if not model:
+        return False
+    if provider == "google":
+        return model != "openrouter/free" and not model.startswith(("openrouter/", "openai/"))
+    if provider == "openai":
+        return model != "openrouter/free" and not model.startswith(("models/", "gemini-", "openrouter/"))
+    return True
+
+
+async def _ai_config(request, segment=None):
     db = _env(request).DB
     values = {}
     for key, default in AI_PROVIDER_DEFAULTS.items():
         values[key] = await _setting(db, key, default)
-    provider = values["ai_provider"]
-    base_url = _ai_base_url(provider, values["ai_base_url"] if provider == "custom" else "")
-    encrypted = await _setting(db, "ai_api_key_enc__" + provider, "")
-    if not encrypted:
+    route = (await _ai_routing_map(db)).get(segment) if segment in AI_SEGMENTS else None
+    provider = str((route or {}).get("provider") or values["ai_provider"]).strip().lower()
+    if provider not in (*AI_PROVIDER_URLS.keys(), "custom"):
+        provider = "openrouter"
+    model = str((route or {}).get("model") or values["ai_model"]).strip()
+    custom_url = (route or {}).get("base_url") if route else (values["ai_base_url"] if provider == "custom" else "")
+    base_url = _ai_base_url(provider, custom_url or "")
+    segment_key_name = "ai_api_key_enc__segment_" + str(segment) if segment in AI_SEGMENTS else ""
+    segment_encrypted = await _setting(db, segment_key_name, "") if segment_key_name else ""
+    use_segment_key = bool(route and route.get("use_own_key") and segment_encrypted)
+    encrypted = segment_encrypted if use_segment_key else await _setting(db, "ai_api_key_enc__" + provider, "")
+    if not encrypted and not segment:
         encrypted = await _setting(db, "ai_api_key_enc", "")
     live_encrypted = await _setting(db, "ai_live_key_enc", "")
     key = await _ai_decrypt(request, encrypted) if encrypted else ""
     live_key = await _ai_decrypt(request, live_encrypted) if live_encrypted else ""
     if not key and provider == "openrouter":
         key = str(getattr(_env(request), "OPENROUTER_API_KEY", "") or "")
-    return {**values, "ai_provider": provider, "ai_base_url": base_url,
+    return {**values, "ai_provider": provider, "ai_model": model, "ai_base_url": base_url,
             "api_key": key, "live_key": live_key, "key_set": bool(key),
+            "model_valid": _ai_model_matches_provider(provider, model),
+            "segment": segment if route else None, "segment_override": bool(route),
+            "segment_key_set": bool(segment_encrypted),
             "live_key_set": bool(live_key)}
+
+
+@app.get("/api/settings/ai-routing")
+async def get_ai_routing(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    db = _env(request).DB
+    routes = await _ai_routing_map(db)
+    default = await _ai_config(request)
+    rows = []
+    for segment, title in AI_SEGMENTS.items():
+        route = routes.get(segment)
+        key_set = bool(await _setting(db, "ai_api_key_enc__segment_" + segment, "")) if route and route.get("use_own_key") else False
+        rows.append({"id": segment, "title": title, "customized": bool(route),
+                     "provider": route.get("provider") if route else default["ai_provider"],
+                     "model": route.get("model") if route else default["ai_model"],
+                     "base_url": route.get("base_url", "") if route else "",
+                     "use_own_key": bool(route and route.get("use_own_key")),
+                     "key_override_set": key_set})
+    return {"default": {"provider": default["ai_provider"], "model": default["ai_model"],
+                        "key_set": default["key_set"], "model_valid": default["model_valid"]},
+            "segments": rows}
+
+
+@app.post("/api/settings/ai-routing")
+async def save_ai_routing(request: Request):
+    user, error = await _require_user(request, ("owner",))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        incoming = data.get("segments")
+        if not isinstance(incoming, list) or len(incoming) > len(AI_SEGMENTS):
+            raise ValueError("Choose valid workspace areas")
+        db = _env(request).DB
+        routes = await _ai_routing_map(db)
+        statements = []
+        for item in incoming:
+            if not isinstance(item, dict):
+                raise ValueError("Check the workspace area settings")
+            segment = str(item.get("id") or "")
+            if segment not in AI_SEGMENTS:
+                raise ValueError("Choose a valid workspace area")
+            key_name = "ai_api_key_enc__segment_" + segment
+            if item.get("mode") != "custom":
+                routes.pop(segment, None)
+                statements.append(db.prepare("DELETE FROM settings WHERE key=?").bind(key_name))
+                continue
+            provider = str(item.get("provider") or "").strip().lower()
+            model = str(item.get("model") or "").strip()
+            base_url = _ai_base_url(provider, item.get("base_url", ""))
+            if not model or len(model) > 200 or any(ord(ch) < 32 for ch in model):
+                raise ValueError("Enter a model ID for " + AI_SEGMENTS[segment])
+            if not _ai_model_matches_provider(provider, model):
+                raise ValueError("Choose a model offered by the selected provider for " + AI_SEGMENTS[segment])
+            use_own_key = bool(item.get("use_own_key"))
+            api_key = str(item.get("api_key") or "").strip()
+            if len(api_key) > 500:
+                raise ValueError("An API key is too long")
+            if use_own_key and api_key:
+                statements.append(db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(key_name, await _ai_encrypt(request, api_key)))
+            elif use_own_key and not await _setting(db, key_name, ""):
+                raise ValueError("Add the separate API key or use the saved provider connection")
+            elif not use_own_key:
+                statements.append(db.prepare("DELETE FROM settings WHERE key=?").bind(key_name))
+            routes[segment] = {"provider": provider, "model": model, "base_url": base_url,
+                               "use_own_key": use_own_key}
+        statements.append(db.prepare("INSERT INTO settings(key,value) VALUES('ai_segment_routing',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(json.dumps(routes, separators=(",", ":"))))
+        statements.append(db.prepare("INSERT INTO audit_log(actor_id,action,entity) VALUES(?,'updated','ai_segment_routing')").bind(user["id"]))
+        await db.batch(statements)
+        return {"ok": True, "segments": len(routes)}
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception:
+        return JSONResponse({"error": "AI area routing could not be saved securely."}, status_code=503)
 
 
 @app.get("/api/settings/ai-provider")
@@ -3626,10 +3742,15 @@ async def get_ai_provider(request: Request):
         return error
     try:
         config = await _ai_config(request)
+        connections = {}
+        for connection in (*AI_PROVIDER_URLS.keys(), "custom"):
+            saved = await _setting(_env(request).DB, "ai_api_key_enc__" + connection, "")
+            connections[connection] = bool(saved) or (connection == "openrouter" and bool(getattr(_env(request), "OPENROUTER_API_KEY", "")))
         return {"provider": config["ai_provider"], "model": config["ai_model"],
                 "base_url": config["ai_base_url"], "key_set": config["key_set"],
+                "model_valid": config["model_valid"], "connections": connections,
                 "live_key_set": config["live_key_set"], "live_model": config["ai_live_model"],
-                "live_voice": config["ai_live_voice"], "enabled": config["key_set"],
+                "live_voice": config["ai_live_voice"], "enabled": config["key_set"] and config["model_valid"],
                 "live_enabled": False, "source": "workspace" if config["key_set"] else "none"}
     except Exception:
         return {"provider": "openrouter", "model": "openrouter/free", "base_url": AI_PROVIDER_URLS["openrouter"],
@@ -3690,10 +3811,19 @@ async def get_ai_models(request: Request):
     if error:
         return error
     try:
-        config = await _ai_config(request)
+        provider = str(request.query_params.get("provider") or "").strip().lower()
+        if provider not in (*AI_PROVIDER_URLS.keys(), "custom"):
+            provider = (await _ai_config(request))["ai_provider"]
+        db = _env(request).DB
+        encrypted = await _setting(db, "ai_api_key_enc__" + provider, "")
+        key = await _ai_decrypt(request, encrypted) if encrypted else ""
+        if not key and provider == "openrouter":
+            key = str(getattr(_env(request), "OPENROUTER_API_KEY", "") or "")
+        base_url = AI_PROVIDER_URLS.get(provider) or await _setting(db, "ai_base_url", "")
+        base_url = _ai_base_url(provider, base_url if provider == "custom" else "")
         models = []
-        if config["key_set"]:
-            response = await fetch(config["ai_base_url"] + "/models", headers={"Authorization": "Bearer " + config["api_key"], "Accept": "application/json"})
+        if key:
+            response = await fetch(base_url + "/models", headers={"Authorization": "Bearer " + key, "Accept": "application/json"})
             if response.ok:
                 payload = await response.json()
                 raw_models = payload.get("data", []) if isinstance(payload, dict) else []
@@ -3701,23 +3831,23 @@ async def get_ai_models(request: Request):
                     mid = str(model.get("id") or "").strip()
                     if not mid:
                         continue
+                    name = str(model.get("name") or mid)[:180]
+                    if any(flag in (mid + " " + name).lower() for flag in ("embedding", "image", "audio", "text-to-speech", "tts", "transcribe", "live", "robotics", "lyria", "video")):
+                        continue
                     pricing = model.get("pricing") or {}
-                    try:
-                        free = float(pricing.get("prompt", 1) or 0) == 0 and float(pricing.get("completion", 1) or 0) == 0
-                    except (TypeError, ValueError):
-                        free = False
-                    models.append({"id": mid, "name": str(model.get("name") or mid)[:180],
-                                   "free": free, "supports_tools": True,
+                    free = None
+                    if isinstance(pricing, dict) and ("prompt" in pricing or "completion" in pricing):
+                        try:
+                            free = float(pricing.get("prompt", 1) or 0) == 0 and float(pricing.get("completion", 1) or 0) == 0
+                        except (TypeError, ValueError):
+                            free = None
+                    models.append({"id": mid, "name": name, "free": free,
+                                   "supports_tools": bool(model.get("supported_parameters") and "tools" in model.get("supported_parameters", [])),
                                    "pricing": pricing})
-        if not models:
-            models = [{"id": "openrouter/free", "name": "OpenRouter Free Router", "free": True, "supports_tools": True},
-                      {"id": "openai/gpt-4o-mini", "name": "GPT-4o mini · compatible endpoint", "free": False, "supports_tools": True},
-                      {"id": "gemini-2.5-flash", "name": "Gemini Flash · compatible endpoint", "free": False, "supports_tools": True}]
-        free_models = [item for item in models if item.get("free")]
-        return {"models": models[:120], "chat_free": free_models[:120], "provider": config["ai_provider"]}
+        free_models = [item for item in models if item.get("free") is True]
+        return {"models": models[:160], "chat_free": free_models[:160], "provider": provider}
     except Exception:
-        return {"models": [{"id": "openrouter/free", "name": "OpenRouter Free Router", "free": True, "supports_tools": True}],
-                "chat_free": [{"id": "openrouter/free", "name": "OpenRouter Free Router", "free": True, "supports_tools": True}]}
+        return {"models": [], "chat_free": [], "provider": request.query_params.get("provider", "")}
 
 
 @app.get("/api/ai/status")
@@ -3726,8 +3856,14 @@ async def ai_status(request: Request):
     if error:
         return error
     try:
-        config = await _ai_config(request)
-        return {"enabled": config["key_set"], "live_enabled": False, "provider": config["ai_provider"], "model": config["ai_model"]}
+        segment = str(request.query_params.get("segment") or "")
+        if segment not in AI_SEGMENTS:
+            segment = None
+        config = await _ai_config(request, segment)
+        return {"enabled": config["key_set"] and config["model_valid"], "live_enabled": False,
+                "provider": config["ai_provider"], "model": config["ai_model"],
+                "model_valid": config["model_valid"], "segment": segment,
+                "segment_title": AI_SEGMENTS.get(segment, "Workspace")}
     except Exception:
         return {"enabled": False, "live_enabled": False, "provider": "", "model": ""}
 
@@ -3758,7 +3894,12 @@ async def ai_chat(request: Request):
         if not isinstance(context, dict):
             raise ValueError("Workspace context is not valid")
         context_json = json.dumps(context, ensure_ascii=False, separators=(",", ":"))[:24000]
-        config = await _ai_config(request)
+        segment = str(data.get("segment") or "")
+        if segment not in AI_SEGMENTS:
+            segment = None
+        config = await _ai_config(request, segment)
+        if not config["model_valid"]:
+            return JSONResponse({"error": "The selected model does not match this area's provider. Choose a compatible model in Settings → OFFTune Dex AI."}, status_code=409)
         if not config["api_key"]:
             return JSONResponse({"error": "The owner needs to add an AI provider API key in Settings → OFFTune Dex AI."}, status_code=503)
         operations = ", ".join(AI_ACTION_ROUTES.keys())
@@ -3775,7 +3916,7 @@ async def ai_chat(request: Request):
         )
         endpoint = config["ai_base_url"] + "/chat/completions"
         payload = {"model": config["ai_model"], "messages": [
-            {"role": "system", "content": system + "\nRole: " + user["role"] + "\nWorkspace reference: " + context_json},
+            {"role": "system", "content": system + "\nRole: " + user["role"] + "\nWorkspace area: " + AI_SEGMENTS.get(segment, "Workspace") + "\nWorkspace reference: " + context_json},
             *messages
         ], "temperature": 0.2, "max_tokens": 1200}
         response = await fetch(endpoint, method="POST", body=json.dumps(payload),
