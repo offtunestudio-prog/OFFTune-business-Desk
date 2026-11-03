@@ -3622,9 +3622,9 @@ def _ai_model_matches_provider(provider, model):
     if not model:
         return False
     if provider == "google":
-        return model != "openrouter/free" and not model.startswith(("openrouter/", "openai/"))
+        return model.startswith(("models/", "gemini-"))
     if provider == "openai":
-        return model != "openrouter/free" and not model.startswith(("models/", "gemini-", "openrouter/"))
+        return not model.startswith(("models/", "gemini-", "openrouter/", "anthropic/", "x-ai/"))
     return True
 
 
@@ -3769,6 +3769,8 @@ async def save_ai_provider(request: Request):
         model = str(data.get("model") or "").strip()
         if not model or len(model) > 200 or any(ord(ch) < 32 for ch in model):
             raise ValueError("Enter a valid model ID")
+        if not _ai_model_matches_provider(provider, model):
+            raise ValueError("Choose a text model published by the selected provider")
         api_key = str(data.get("api_key") or "").strip()
         live_key = str(data.get("gemini_api_key") or "").strip()
         if len(api_key) > 500 or len(live_key) > 500:
@@ -3785,7 +3787,9 @@ async def save_ai_provider(request: Request):
         if live_key:
             updates.append(("ai_live_key_enc", await _ai_encrypt(request, live_key)))
         await db.batch([db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(k, v) for k, v in updates])
-        return {"ok": True, "provider": provider, "model": model, "key_set": bool(api_key) or bool(await _setting(db, "ai_api_key_enc", ""))}
+        saved_key = await _setting(db, "ai_api_key_enc__" + provider, "")
+        env_key = bool(getattr(_env(request), "OPENROUTER_API_KEY", "")) if provider == "openrouter" else False
+        return {"ok": True, "provider": provider, "model": model, "key_set": bool(api_key) or bool(saved_key) or env_key}
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception:
