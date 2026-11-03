@@ -16,6 +16,7 @@ const addMonthsIso = (iso, count) => { const [y,m,d]=String(iso||today()).split(
 const titleCase = (s) => String(s || "").replaceAll("_", " ").replace(/\b\w/g, x => x.toUpperCase());
 
 const readCache=new Map();
+let navigationGeneration=0;
 async function api(path, options = {}) {
   const method=String(options.method||"GET").toUpperCase();
   const cacheable=method==="GET"&&path.startsWith("/api/")&&!path.startsWith("/api/auth/")&&path!=="/api/backup";
@@ -233,6 +234,7 @@ function renderNav() {
 async function navigate(page,initial=null) {
   const permissionKey=page==="my-goals"?"targets":page;
   if(state.user?.role!=="owner"&&page!=="overview"&&!(state.user?.permissions||[]).includes(permissionKey)){toast("This feature is not enabled for your designation",true);page="overview";}
+  const generation=++navigationGeneration;
   state.page = page; renderNav();
   const meta = navItems().find(x => x.id === page); if (!meta) return;
   $("#page-title").textContent = meta.label;
@@ -246,6 +248,7 @@ async function navigate(page,initial=null) {
       range && state.user.role === "employee" ? initial?.targetCourses||api("/api/targets/self?month="+encodeURIComponent(today().slice(0,7))).catch(()=>({courses:[]})) : Promise.resolve(null),
       page === "messages" ? api("/api/team/messages") : Promise.resolve(null)
     ]);
+    if(generation!==navigationGeneration)return;
     const d = freshDashboard || state.data.dashboard || {role:state.user.role};
     if (freshDashboard && (!state.user || d.role !== state.user.role)) {
       throw new Error("Workspace data is out of sync with the signed-in account. Refresh the page to reload your workspace.");
@@ -273,7 +276,7 @@ async function navigate(page,initial=null) {
     else if (page === "team") await renderTeam(d);
     else if (page === "reports") renderReports();
     else if (page === "settings") renderSettings();
-  } catch (e) { $("#content").innerHTML = `<div class="notice error">${esc(e.message)}</div>`; }
+  } catch (e) { if(generation===navigationGeneration)$("#content").innerHTML = `<div class="notice error">${esc(e.message)}</div>`; }
 }
 
 function overviewRange(preset=state.overviewPreset) {
@@ -532,7 +535,9 @@ function showFinancePanel(section=state.financeSection||"overview"){
   $$(`[data-finance-tab]`).forEach(tab=>tab.classList.toggle("active",tab.dataset.financeTab===section));
 }
 function renderCollectionsWorkspace(){
+  const generation=navigationGeneration;
   Promise.all([api("/api/payments"),api("/api/installments"),api("/api/analytics/batches"),api("/api/analytics/courses")]).then(([payments,installments,batchAnalytics,courseAnalytics])=>{
+    if(generation!==navigationGeneration)return;
     state.installments=installments;state.data.collectionPayments=payments;
     const val=x=>Number(String(x||0).replace(/,/g,"").replace(/[^0-9.-]/g,""))||0;
     const todayIso=today();
@@ -661,10 +666,12 @@ function renderCollectionsWorkspace(){
     $$(`[data-collection-toggle]`).forEach(toggle=>toggle.onclick=()=>{const article=toggle.closest(".collection-student-card"),detail=$(".collection-student-details",article),open=toggle.getAttribute("aria-expanded")!=="true";toggle.setAttribute("aria-expanded",String(open));article.classList.toggle("expanded",open);if(open){detail.hidden=false;requestAnimationFrame(()=>detail.classList.add("open"));}else{detail.classList.remove("open");setTimeout(()=>{if(toggle.getAttribute("aria-expanded")==="false")detail.hidden=true;},260);}});
     apply();applyDue();
     if(state.collectionHistoryJump){state.collectionHistoryJump=false;setTimeout(()=>$(".collection-history-panel")?.scrollIntoView({behavior:"smooth",block:"start"}),120);}
-  }).catch(e=>{$("#content").innerHTML=`<div class="notice error">${esc(e.message)}</div>`;});
+  }).catch(e=>{if(generation===navigationGeneration)$("#content").innerHTML=`<div class="notice error">${esc(e.message)}</div>`;});
 }
 function renderFollowupWorkspace(){
+  const generation=navigationGeneration;
   Promise.all([api("/api/payments"),api("/api/installments"),api("/api/followup/settings")]).then(([payments,items,followupConfig])=>{
+    if(generation!==navigationGeneration)return;
     const employee=state.user.role==="employee",nonOwner=state.user.role!=="owner";
     state.installments=items;
     const val=x=>Number(String(x||0).replace(/,/g,"").replace(/[^0-9.-]/g,""))||0;
@@ -738,7 +745,7 @@ function renderFollowupWorkspace(){
     document.querySelectorAll("[data-followup-preset]").forEach(button=>button.onclick=()=>{const [kind,raw]=button.dataset.followupPreset.split(":");const value=Number(raw);try{localStorage.setItem(kind==="past"?"offtune-followup-past-days":"offtune-followup-upcoming-days",String(value));}catch{}state.followupFilter=kind;const scrollY=window.scrollY;renderFollowupWorkspace();requestAnimationFrame(()=>window.scrollTo({top:scrollY,behavior:"instant"}));});
     const recentUnitSelect=$("[data-followup-unit='recent']");if(recentUnitSelect)recentUnitSelect.onchange=()=>{const unit=recentUnitSelect.value;try{localStorage.setItem("offtune-followup-recent-unit",unit);}catch{}renderFollowupWorkspace();};
     $("#followup-search").oninput=apply;apply();
-  }).catch(e=>{$("#content").innerHTML=`<div class="notice error">${esc(e.message)}</div>`;});
+  }).catch(e=>{if(generation===navigationGeneration)$("#content").innerHTML=`<div class="notice error">${esc(e.message)}</div>`;});
 }
 
 function renderProducts() {
@@ -793,7 +800,9 @@ function openCourseStudents(courseName){
   });
 }
 function renderBatches() {
+  const generation=navigationGeneration;
   api("/api/analytics/batches").then(stats=>{
+    if(generation!==navigationGeneration)return;
     const employee=state.user.role==="employee",nonOwner=state.user.role!=="owner";
     const byId=new Map(stats.map(x=>[x.batch_id,x]));
     const unassignedStats=byId.get(null)||{students:0,orders:0,pending:0};
@@ -844,7 +853,9 @@ function renderBatches() {
   }).catch(e=>toast(e.message,true));
 }
 function renderAnalytics() {
+  const generation=navigationGeneration;
   api("/api/analytics/courses").then(rows=>{
+    if(generation!==navigationGeneration)return;
     const employee=state.user.role==="employee",nonOwner=state.user.role!=="owner";
     const productCourses=state.products.filter(p=>p.product_type==="course");
     const byName=new Map(rows.map(x=>[String(x.name||"").toLowerCase(),x]));
@@ -915,7 +926,9 @@ function renderAnalytics() {
   }).catch(e=>toast(e.message,true));
 }
 function renderExpenses() {
+  const generation=navigationGeneration;
   api("/api/expenses").then(es=>{
+    if(generation!==navigationGeneration)return;
     const owner=state.user.role==="owner";
     const rows=es.map(e=>`<tr><td>${day(e.date)}</td><td>${esc(e.category)}</td><td>${esc(e.description)}</td><td>${money(e.amount)}</td><td>${esc(e.method||"—")}</td><td>${e.recurring?statusBadge("active"):"—"}</td>${owner?`<td>${btn("Delete","delete-expense:"+e.id,"button small danger")}</td>`:""}</tr>`);
     const sum=es.reduce((a,e)=>a+Number(e.amount||0),0);
@@ -934,6 +947,7 @@ function confirmDeleteExpense(id){
   }).catch(error=>toast(error.message,true));
 }
 function renderIncentives() {
+  const generation=navigationGeneration;
   const compatibility={rulesUnavailable:false,payoutsUnavailable:false};
   const ownerCanManagePayout=state.user.role==="owner";
   const loadIncentiveData = path => api(path).catch(error => { throw new Error(`${path}: ${error.message}`); });
@@ -946,6 +960,7 @@ function renderIncentives() {
     throw error;
   });
   Promise.all([loadIncentiveData("/api/commissions"), state.user.role==="employee"?Promise.resolve([]):loadIncentiveData("/api/team"), loadIncentiveRules, loadPayoutHistory]).then(([allEvents,loadedTeam,rules,payoutHistory])=>{
+    if(generation!==navigationGeneration)return;
     const employee=state.user.role==="employee", todayIso=today(), visibleEvents=state.user.role==="owner"?allEvents.filter(e=>Number(e.employee_id)!==Number(state.user.id)):allEvents;
     const allEventsSorted=[...allEvents].sort((a,b)=>String(a.due_date||"").localeCompare(String(b.due_date||""))||Number(b.balance)-Number(a.balance));
     const n=x=>Number(x||0), sum=(xs,key)=>xs.reduce((t,x)=>t+n(x[key]),0), validDate=x=>/^\d{4}-\d{2}-\d{2}$/.test(x||""), showRate=x=>x==null?"—":`${n(x).toFixed(2)}%`;
@@ -1026,14 +1041,16 @@ function renderIncentives() {
   });
 }
 async function renderInvoices() {
+  const generation=navigationGeneration;
   try {
-    const invs=await api("/api/invoices");state.invoices=invs;
+    const invs=await api("/api/invoices");if(generation!==navigationGeneration)return;state.invoices=invs;
     const amount=value=>Number(String(value||0).replace(/[^0-9.-]/g,""))||0;
     const activeCurrency=state.settings.currency||invs[0]?.currency||"INR",current=invs.filter(i=>(i.currency||activeCurrency)===activeCurrency),otherCurrencies=invs.length-current.length;
     const accountInvoices=current.filter(i=>i.invoice_kind!=="installment");
     const total=accountInvoices.reduce((n,i)=>n+amount(i.total),0),received=accountInvoices.reduce((n,i)=>n+amount(i.received),0),balance=accountInvoices.reduce((n,i)=>n+amount(i.balance),0);
     const manager=state.user.role==="manager",employee=state.user.role==="employee",owner=state.user.role==="owner",canManageInvoices=owner||manager;
     const [reminderConfig,invoiceTemplate]=canManageInvoices?await Promise.all([api("/api/settings/reminders"),api("/api/invoice/template")]):[null,null];
+    if(generation!==navigationGeneration)return;
     if(invoiceTemplate)state.settings={...state.settings,...invoiceTemplate};
     const invoiceReminderEmailsActive=Boolean(reminderConfig?.channels?.email_invoice_enabled);
     const emiPlan=reminderConfig?.emi_plan||{stages:[{offset_days:-5,label:"5 days before",subject:"Upcoming payment · {order_no}",body:"Hello {student}, your installment of {amount_due} is due on {due_date}. Please plan your payment."},{offset_days:-1,label:"1 day before",subject:"Payment due tomorrow · {order_no}",body:"Hello {student}, your installment of {amount_due} is due tomorrow ({due_date}). Please make the payment on time."},{offset_days:0,label:"Due today",subject:"Payment due today · {order_no}",body:"Hello {student}, your installment of {amount_due} is due today ({due_date}). Please pay today or contact our team if you need help."},{offset_days:3,label:"3 days overdue",subject:"Missed installment · {order_no}",body:"Please pay now to avoid any late fee that may apply under your agreement."},{offset_days:5,label:"5 days overdue",subject:"Payment follow-up · {order_no}",body:"Please arrange payment now to avoid possible interruption under your enrollment terms."}],repeat_days:0,repeat_after:10};
@@ -1166,11 +1183,13 @@ function deleteInvoice(id) {
   openModal(`Delete invoice · ${invoice.invoice_no}`,`<div class="invoice-delete-warning"><span>!</span><div><strong>Are you sure you want to delete this invoice?</strong><small>This removes the invoice document only. The recorded sale, student, payment history and invoice number sequence remain unchanged. Managers can delete invoices for their reporting team only.</small></div></div><label class="delete-confirm-check"><input name="confirmed" type="checkbox" required><span>Yes, delete this invoice</span></label>`,async form=>{await post("/api/invoices/delete",{invoice_id:invoice.id,confirmed:form.confirmed.checked});},"Delete invoice","Invoice deleted; sales and payments were kept");
 }
 async function renderTargets() {
+  const generation=navigationGeneration;
   if (!["owner","manager"].includes(state.user.role)) throw new Error("Targets are managed by the owner and manager");
   const current = today().slice(0, 7);
   const isManager=state.user.role==="manager";
   state.targetsMonth = state.targetsMonth || current;
   const data = await api("/api/targets?month=" + encodeURIComponent(state.targetsMonth));
+  if(generation!==navigationGeneration)return;
   state.targetData = data;
   $("#content").classList.toggle("manager-target-view",isManager);
   const s = data.summary || {}, people = data.team || [];
@@ -1232,17 +1251,20 @@ function bindTargetCourseEditor(form,refresh){$$(".target-course-row-edit",form)
 function renderTargetCourseChecklist(courses){if(!courses.length)return `<div class="target-self-empty"><span>◎</span><div><strong>No course goals assigned yet</strong><small>Your monthly course plan will appear here when your ${state.user?.role==="employee"?"founder or manager":"owner"} assigns it.</small></div></div>`;return `<div class="target-self-course-list">${courses.map(c=>`<article class="target-self-course"><div class="target-self-course-top"><span class="target-course-mark ${c.remaining===0&&c.target?"done":""}">${c.remaining===0&&c.target?"✓":"◎"}</span><div><strong>${esc(c.name)}</strong><small>${c.completed} of ${c.target} complete · ${c.remaining} left this month</small></div><b>${c.percent}%</b></div><div class="target-progress-track"><i style="width:${c.percent}%"></i></div><div class="target-self-course-bottom"><span>This week <strong>${c.current_week?`${c.current_week.completed} / ${c.current_week.target}`:"—"}</strong>${c.current_week?.carry_in?` · ${c.current_week.carry_in} carried`:""}</span>${canViewData("target-estimates")&&canViewData("own-incentives")?`<span>Projected incentive on logged conversions <strong>${money(c.earned_incentive_estimate)}</strong> so far · ${money(c.estimated_incentive)} at goal</span>`:""}<button type="button" class="button small ${c.remaining?"primary":"secondary"}" data-action="mark-course-conversion:${c.product_id}" ${c.remaining?"":"disabled"}>${c.remaining?"＋ Log conversion":"Goal complete"}</button></div>${c.reports?.length?`<details class="target-report-list"><summary>My check-ins · ${c.reports.length}</summary>${c.reports.map(r=>`<div><span>${r.matched_to_sale?"✓":"◷"}</span><strong>${esc(r.student_name)}</strong><small>${day(r.converted_on)}${r.matched_to_sale?" · sale matched":" · awaiting sale record"}</small></div>`).join("")}</details>`:""}</article>`).join("")}</div>`;}
 function openTargetConversion(productId){const course=(state.data.dashboard?.targetCourses?.courses||[]).find(c=>Number(c.product_id)===Number(productId));if(!course)return;openModal(`Log conversion · ${course.name}`,`<div class="notice compact">This check-in updates course-target progress and is visible to the owner. Record the sale in Finance Desk as well so enrollment and incentive records stay in sync.</div><div class="form-grid"><label>Student name<input name="student_name" maxlength="120" required></label><label>Conversion date<input name="converted_on" type="date" value="${today()}" max="${today()}" required></label><label class="full-row">Note (optional)<textarea name="notes" rows="2" maxlength="500"></textarea></label></div>`,async form=>post("/api/targets/report",{product_id:course.product_id,student_name:form.student_name.value,converted_on:form.converted_on.value,notes:form.notes.value}),"Mark converted","Conversion logged for your course target");}
 async function renderTeam(d) {
-  if(state.user.role==="owner"){const payload=await api("/api/team/designations");state.designations=payload.designations||[];state.accessFeatures=payload.features||[];state.dataAccessOptions=payload.data_options||[];}
+  const generation=navigationGeneration;
+  if(state.user.role==="owner"){const payload=await api("/api/team/designations");if(generation!==navigationGeneration)return;state.designations=payload.designations||[];state.accessFeatures=payload.features||[];state.dataAccessOptions=payload.data_options||[];}
 
   const people=state.team;
   const manager=state.user.role==="manager";
   if(manager)state.managerIncentiveRules=await api("/api/incentive/team-rules").catch(()=>[]);
+  if(generation!==navigationGeneration)return;
   const teamRows=(d.team||[]).map(t=>`<tr><td><strong>${esc(t.name)}</strong><small class="subcell">${esc(t.job_title||titleCase(t.role))}</small></td><td>${t.weekly_target?`${t.weekly_conversions} / ${t.weekly_target}${t.weekly_carry_forward?` <small class="subcell">${t.weekly_carry_forward} carried</small>`:""}`:"No target set"}</td><td>${t.target?`${t.conversions} / ${t.target}`:"No target set"}</td><td>${manager&&t.role==="employee"?`<button type="button" class="button small secondary" data-page="targets">Target</button> <button type="button" class="button small secondary" data-action="edit-user:${t.id}">Edit</button> <button type="button" class="button small secondary" data-action="reset-user-password:${t.id}">Reset login</button> <button type="button" class="button small secondary" data-action="send-team-message:${t.id}">Message</button>`:state.user.role==="owner"?`<button type="button" class="button small secondary" data-page="targets">Targets</button>`:"<span class=\"field-hint\">Founder managed</span>"}</td></tr>`);
   const personCard=(p,owner=false)=>{const perf=(d.team||[]).find(x=>Number(x.id)===Number(p.id))||{};const actions=owner?`<button type="button" class="button small secondary" data-page="settings">Account settings</button>${btn("Profile photo","edit-photo:${p.id}","button small secondary")}`:manager?`<button type="button" class="button small secondary" data-page="targets">Targets</button>${p.role==="employee"&&Number(p.manager_id)===Number(state.user.id)?btn("Incentive split",`team-incentive:${p.id}`,"button small secondary"):""} ${btn("Send reminder",`send-team-message:${p.id}`,"button small secondary")}`:`${btn("Edit profile",`edit-user:${p.id}`,"button small secondary")} ${btn("Profile photo",`edit-photo:${p.id}`,"button small secondary")} <button type="button" class="button small secondary" data-page="targets">Targets</button> ${btn("Reset login",`reset-user-password:${p.id}`,"button small secondary")} ${btn("Preview workspace",`preview-workspace:${p.id}`,"button small secondary")} ${btn("Send reminder",`send-team-message:${p.id}`,"button small secondary")} ${btn(p.active?"Remove from team":"Restore access",`user-status:${p.id}:${p.active?"off":"on"}`,`button small ${p.active?"danger":"secondary"}`)}`;const weekly=perf.weekly_target?`${perf.weekly_conversions??0} / ${perf.weekly_target} this week${perf.weekly_carry_forward?` · +${perf.weekly_carry_forward} carried`:""}`:"No weekly target";const monthly=perf.target?`${perf.conversions??0} / ${perf.target} this month`:"No monthly target";const label=p.designation||p.job_title||titleCase(p.role), initials=p.name.split(/\s+/).map(x=>x[0]).slice(0,2).join("").toUpperCase();return `<article class="team-person-card" data-team-row data-team-role="${esc(p.role)}" data-team-name="${esc(`${p.name} ${p.email} ${label}`.toLowerCase())}" data-team-active="${owner||p.active?"yes":"no"}"><header><span class="team-person-avatar ${p.role==="manager"||owner?"manager":""}">${p.avatar_data?`<img src="${esc(p.avatar_data)}" alt="${esc(p.name)} profile photo">`:esc(initials)}</span><span class="team-person-identity"><strong>${esc(p.name)}</strong><small>${esc(label)} · ${esc(p.email)}</small></span><span class="team-person-badges">${statusBadge(p.role)}${statusBadge(owner||p.active?"active":"inactive")}</span></header><div class="team-person-info"><span><small>Reports to</small><b>${esc(owner?"—":p.manager_name||"Owner")}</b></span><span><small>Target progress</small><b>${owner?"—":weekly}</b><small>${owner?"Owner account":monthly}</small></span></div><div class="team-person-actions">${actions}</div></article>`;};
   const personCards=people.map(p=>personCard(p)).join("");
   const ownerCard=state.user.role==="owner"?personCard({...state.user,active:true},true):"";
   let rates=state.incentiveRules||{pool_rate:5,rep_rate:2,manager_rate:3,payout_due_days:30};
   if(!manager){try{rates=await api("/api/incentive/settings");state.incentiveRules=rates;}catch{}}
+  if(generation!==navigationGeneration)return;
   const managers=people.filter(p=>p.role==="manager").length,employees=people.filter(p=>p.role==="employee").length,activeCount=people.filter(p=>p.active).length;
   const designationPanel=!manager?`<section class="panel designation-admin-panel"><div class="panel-heading"><div><p class="eyebrow">CUSTOM ROLES & PERMISSIONS</p><h3>Designation access</h3><p>Create as many designations as needed. Choose a manager or employee access class, then select the sections it can use.</p></div><button type="button" class="button primary" data-action="new-designation">＋ New designation</button></div><div class="designation-card-grid">${state.designations.map(item=>{const assigned=people.filter(p=>Number(p.designation_id)===Number(item.id)).length;return `<article class="designation-card"><span class="designation-mark">${item.role_class==="manager"?"◇":"○"}</span><div class="designation-card-main"><strong>${esc(item.name)}</strong><small>${titleCase(item.role_class)} access class · ${assigned} account${assigned===1?"":"s"}</small><p>${(item.permissions||[]).map(key=>state.accessFeatures.find(f=>f.key===key)?.label||key).join(" · ")||"No sections enabled"}</p></div><div class="designation-card-actions">${btn("Edit access",`edit-designation:${item.id}`,"button small secondary")}${!item.system?btn("Delete",`delete-designation:${item.id}`,"button small danger"):""}</div></article>`;}).join("")}</div><div class="notice compact">Expense records can be granted as a view-only section. Owner settings, incentive payouts and workspace data reset remain owner-only.</div></section>`:"";
   const splitPanel=!manager?`<section class="panel team-split-panel"><div class="panel-heading"><div><p class="eyebrow">INCENTIVE SETUP · FUTURE RECEIPTS</p><h3>Commission policy</h3><p>Set each percentage and preview the exact amount from a collected payment.</p></div><span class="team-split-total" id="team-split-total">${(Number(rates.rep_rate)+Number(rates.manager_rate)).toFixed(2)}% allocated</span></div><form id="team-commission-form" class="team-split-form"><label>Default course pool (%)<input name="pool_rate" type="number" min="0" max="100" step="0.01" value="${esc(rates.pool_rate??5)}" required><small>Default for new courses; each course can override it in Products.</small></label><div class="team-split-rate-row"><label>Sales employee (%)<input name="rep_rate" type="number" min="0" max="100" step="0.01" value="${esc(rates.rep_rate)}" required><small>Applied when an employee owns the sale</small></label><span class="team-split-plus" aria-hidden="true">+</span><label>Manager chain (%)<input name="manager_rate" type="number" min="0" max="100" step="0.01" value="${esc(rates.manager_rate)}" required><small>Shared by managers above that employee</small></label><button type="submit" class="button primary">Save policy</button></div><p class="team-split-validation" id="team-split-validation" aria-live="polite">Employee and manager percentages must fit inside the course pool.</p></form><section class="team-split-preview" aria-label="Commission split example"><div class="team-split-preview-heading"><div><small>EMPLOYEE-OWNED SALE · WITH A REPORTING MANAGER</small><strong>When ₹10,000 is collected</strong></div><span id="team-split-preview-total">₹500 course pool</span></div><div class="team-split-bar" aria-hidden="true"><i class="seller-share" id="team-seller-bar"></i><i class="manager-share" id="team-manager-bar"></i><i class="unused-share" id="team-unused-bar"></i></div><div class="team-split-legend"><span><i class="seller-dot"></i>Sales employee <b id="team-seller-percent">2.00%</b> · <strong id="team-seller-example">₹200</strong></span><span><i class="manager-dot"></i>Manager chain <b id="team-manager-percent">3.00%</b> · <strong id="team-manager-example">₹300</strong></span><span><i class="unused-dot"></i>Unallocated <b id="team-unused-percent">0.00%</b> · <strong id="team-unused-example">₹0</strong></span></div><p>A manager-owned sale credits the full pool to that manager. If an employee has no assigned manager, the employee gets the full pool. With a reporting line, the employee and managers follow the percentages above. Old incentive records keep their original rates.</p></section></section>`:"";
@@ -1274,9 +1296,11 @@ function renderManagerReports(orders,payments,installments,commissions){
   $("#report-apply-range")?.addEventListener("click",()=>{const f=$("#report-from").value,t=$("#report-to").value;if(!f||!t||f>t){toast("Choose a valid date range",true);return;}state.reportFrom=f;state.reportTo=t;state.reportRange="custom";renderReports();});
 }
 function renderReports() {
+  const generation=navigationGeneration;
 
   const isOwner=state.user.role==="owner";
   Promise.all([api("/api/orders"),api("/api/payments"),api("/api/installments"),api("/api/commissions"),isOwner?api("/api/expenses"):Promise.resolve([])]).then(([orders,payments,installments,commissions,expenses])=>{
+    if(generation!==navigationGeneration)return;
     if(state.user.role==="manager"){renderManagerReports(orders,payments,installments,commissions);return;}
     state.orders=orders;
     const to=today(),shift=(iso,n)=>{const d=new Date(iso+"T00:00:00");d.setDate(d.getDate()+n);return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");};
@@ -1363,8 +1387,10 @@ async function exportWorkspaceBackup(){
   }catch(error){toast(`Backup failed: ${error.message}`,true);}
 }
 function renderSettings(){
+  const generation=navigationGeneration;
   const s=state.settings||{};
   Promise.all([api("/api/team").catch(()=>state.team||[]),api("/api/audit").catch(()=>[]),api("/api/settings/email-sender").catch(()=>({})),api("/api/settings/reminders").catch(()=>({channels:{},recent:[],counts:{},sender_verified:false,send_time:"09:00",daily_limit:20,emi_plan:{stages:[],repeat_days:0,repeat_after:10}})),api("/api/settings/razorpay").catch(()=>({})),api("/api/settings/ai-provider").catch(()=>({}))]).then(([people,auditRows,sender,automation,razorpay,aiProvider])=>{
+    if(generation!==navigationGeneration)return;
     state.team=people;const active=people.filter(p=>p.active),inactive=people.length-active.length,managerCount=active.filter(p=>p.role==="manager").length,employeeCount=active.filter(p=>p.role==="employee").length;
     const owner=state.user||{},senderStatus=sender.verified?"SMTP verified":sender.configured?"Setup saved · connection test needed":"Not configured";
     const channels=automation.channels||{},emiPlan=automation.emi_plan||{stages:[],repeat_days:0,repeat_after:10},stageRows=(emiPlan.stages||[]).map(stage=>`<article class="emi-stage-row" data-emi-stage><div class="emi-stage-fields"><label>Days from due date<input data-stage-field="offset_days" type="number" min="-365" max="3650" value="${Number(stage.offset_days)||0}" required><small>−5 = five days before · 0 = due day · +5 = five days late</small></label><label>Stage name<input data-stage-field="label" value="${esc(stage.label||"")}" maxlength="60" required></label><label class="full-row">Email subject<input data-stage-field="subject" value="${esc(stage.subject||"")}" maxlength="180" required></label><label class="full-row">Message<textarea data-stage-field="body" rows="3" maxlength="2000" required>${esc(stage.body||"")}</textarea></label></div><button type="button" class="button small secondary" data-stage-remove>Remove stage</button></article>`).join(""),emailRows=(automation.recent||[]).map(r=>`<tr><td>${esc(titleCase(r.category))}</td><td>${esc(r.recipient)}</td><td>${esc(r.subject)}</td><td>${esc(day(String(r.scheduled_at||"").slice(0,10)))}${r.sent_at?`<small class="subcell">Sent ${esc(new Date(r.sent_at).toLocaleTimeString("en-IN",{hour:"numeric",minute:"2-digit"}))}</small>`:""}</td><td>${statusBadge(r.status)}${r.status==="failed"&&Number(r.attempts)<3?`<button type="button" class="text-button email-retry-button" data-email-retry="${r.id}">Retry</button>`:""}</td></tr>`);
@@ -1437,7 +1463,7 @@ function renderSettings(){
     if(removeLogo)removeLogo.onclick=async()=>{try{await post("/api/settings/logo",{data_url:""});state.settings.invoice_logo_data="";state.settings.invoice_logo_customized="0";applyBrandLogo("");if(logoPreview)logoPreview.innerHTML=`<img src="/q-logo.png?v=20261031-qbrand-v1" alt="OFFTune logo">`;removeLogo.hidden=true;toast("Default OFFTune logo restored");}catch(error){toast(error.message,true);}};
     $("[data-settings-reset-data]").onclick=()=>openModal("Delete student, invoice & expense data",`<div class="notice error compact"><strong>Are you sure you want to delete student records, every invoice and expenses?</strong><p>This removes students, sales, payments, EMI schedules, follow-ups, all invoices and their saved details or installment drafts, linked email and online payment records, incentives, tax details and expenses. Team accounts, courses, batches, logo, settings and targets stay.</p></div><label class="delete-confirm-check"><input name="confirmed" type="checkbox" required><span>Yes, delete student, invoice and expense data</span></label><label class="settings-confirm-field">Current owner password<input name="current_password" type="password" autocomplete="current-password" required></label>`,async form=>post("/api/data/reset",{scope:"records",confirmed:form.confirmed.checked,current_password:form.current_password.value}),"Delete student, invoice & expense data","Student, invoice and expense records deleted");
     $("[data-settings-reset-workspace]").onclick=()=>openModal("Factory reset · remove team and workspace data",`<div class="notice error compact"><strong>Are you sure you want to factory reset this workspace?</strong><p>This removes all team accounts, courses/products, batches, student and transaction history, every invoice, expenses, messages, and custom settings. Your owner login remains. Download a backup first.</p></div><label class="delete-confirm-check"><input name="confirmed" type="checkbox" required><span>Yes, remove all team accounts and workspace data</span></label><label class="settings-confirm-field">Current owner password<input name="current_password" type="password" autocomplete="current-password" required></label>`,async form=>post("/api/data/reset",{scope:"workspace",confirmed:form.confirmed.checked,current_password:form.current_password.value}),"Factory reset","Workspace reset. Your owner login is ready for a fresh setup.");
-  }).catch(error=>{$("#content").innerHTML=`<div class="notice error">${esc(error.message)}</div>`;});
+  }).catch(error=>{if(generation===navigationGeneration)$("#content").innerHTML=`<div class="notice error">${esc(error.message)}</div>`;});
 }
 
 async function openAIAssistant(){
