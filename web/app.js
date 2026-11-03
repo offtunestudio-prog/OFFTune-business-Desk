@@ -144,7 +144,10 @@ async function enterApp() {
   renderAccountAvatar();
   $("#role-label").textContent = `${state.user.designation||state.user.job_title||titleCase(state.user.role)} workspace`;
   const preview=$("#workspace-preview-banner"); if(preview){preview.classList.toggle("hidden",!state.workspacePreview);preview.innerHTML=state.workspacePreview?`<span><strong>Previewing ${esc(state.user.name)}’s ${esc(state.user.job_title||titleCase(state.user.role))} workspace</strong><small>Signed in as ${esc(state.workspaceOwnerName)} · Changes here use this team member’s access.</small></span><button type="button" class="button small secondary" id="return-owner-workspace">Return to owner workspace</button>`:"";$("#return-owner-workspace")?.addEventListener("click",async()=>{try{await post("/api/team/preview/end",{});location.reload();}catch(e){toast(e.message,true);}});}
-  const common = loadCommon();
+  const common = loadCommon().then(()=>{
+    if(state.page==="overview"&&state.data.dashboard)renderDashboard(state.data.dashboard);
+  });
+  state.commonPromise=common;
   const settings = state.user.role === "owner" ? api("/api/settings").catch(() => ({})) : Promise.resolve(state.settings);
   const incentiveRules = ["owner","manager"].includes(state.user.role) ? api("/api/incentive/settings").catch(() => state.incentiveRules) : Promise.resolve(state.incentiveRules);
   const range=overviewRange(state.overviewPreset);
@@ -154,7 +157,7 @@ async function enterApp() {
   ]);
   state.settings=profile;state.incentiveRules=rules;
   applyBrandLogo(state.settings.invoice_logo_data||"");
-  await common; renderNav(); await navigate("overview",{dashboard,overview,targetCourses,range}); startMessagePolling();
+  renderNav(); await navigate("overview",{dashboard,overview,targetCourses,range}); startMessagePolling();
   api("/api/team/messages").then(messages=>{state.teamMessages=messages;updateNotificationUI();}).catch(()=>{});
 }
 function updateNotificationUI(){
@@ -245,6 +248,7 @@ async function navigate(page,initial=null) {
     if(generation===navigationGeneration)content.innerHTML=`<div class="loading"><span></span>Loading your workspace</div>`;
   },initial?300:650);
   try {
+    if(page!=="overview"&&state.commonPromise)await state.commonPromise;
     const needsDashboard = page === "overview" || page === "team";
     const range = page === "overview" ? initial?.range||overviewRange(state.overviewPreset) : null;
     const [freshDashboard, overview, targetCourses, messages] = await Promise.all([
