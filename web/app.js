@@ -1056,7 +1056,7 @@ function renderIncentives() {
     if(content)content.innerHTML=`<section class="panel notice error"><strong>Incentive data could not load.</strong><p>${esc(e.message)}</p><button type="button" class="button secondary" data-action="retry-incentives">Try again</button></section>`;
   });
 }
-async async function renderInvoices() {
+async function renderInvoices() {
   const generation=navigationGeneration;
   try {
     const manager=state.user.role==="manager",employee=state.user.role==="employee",owner=state.user.role==="owner",canManageInvoices=owner||manager;
