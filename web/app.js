@@ -157,12 +157,15 @@ async function enterApp() {
   state.settingsPromise=settingsPromise;
   state.incentiveRulesPromise=incentiveRulesPromise;
   const range=overviewRange(state.overviewPreset);
-  const [dashboard,overview,targetCourses]=await Promise.all([
-    api("/api/dashboard"),loadOverviewData(range.from,range.to),
-    state.user.role==="employee"?api("/api/targets/self?month="+encodeURIComponent(today().slice(0,7))).catch(()=>({courses:[]})):Promise.resolve(null)
-  ]);
-  state.data.dashboard=dashboard;
-  renderNav(); await navigate("overview",{dashboard,overview,targetCourses,range}); startMessagePolling();
+  const initial={
+    dashboard:api("/api/dashboard").then(value=>{state.data.dashboard=value;return value;}),
+    overview:loadOverviewData(range.from,range.to),
+    targetCourses:state.user.role==="employee"?api("/api/targets/self?month="+encodeURIComponent(today().slice(0,7))).catch(()=>({courses:[]})):Promise.resolve(null),
+    range
+  };
+  renderNav();
+  await navigate("overview",initial);
+  startMessagePolling();
   api("/api/team/messages").then(messages=>{state.teamMessages=messages;updateNotificationUI();}).catch(()=>{});
 }
 function updateNotificationUI(){
