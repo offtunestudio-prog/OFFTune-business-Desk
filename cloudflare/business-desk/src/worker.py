@@ -3642,6 +3642,10 @@ async def _ai_config(request, segment=None):
     model = str((route or {}).get("model") or values["ai_model"]).strip()
     if provider == "google" and model.lower().startswith("models/"):
         model = model[7:]
+    model_recovered = False
+    if provider == "google" and not _ai_model_matches_provider(provider, model):
+        model = "gemini-3.8-flash"
+        model_recovered = True
     custom_url = (route or {}).get("base_url") if route else (values["ai_base_url"] if provider == "custom" else "")
     base_url = _ai_base_url(provider, custom_url or "")
     segment_key_name = "ai_api_key_enc__segment_" + str(segment) if segment in AI_SEGMENTS else ""
@@ -3657,7 +3661,7 @@ async def _ai_config(request, segment=None):
         key = str(getattr(_env(request), "OPENROUTER_API_KEY", "") or "")
     return {**values, "ai_provider": provider, "ai_model": model, "ai_base_url": base_url,
             "api_key": key, "live_key": live_key, "key_set": bool(key),
-            "model_valid": _ai_model_matches_provider(provider, model),
+            "model_valid": _ai_model_matches_provider(provider, model), "model_recovered": model_recovered,
             "segment": segment if route else None, "segment_override": bool(route),
             "segment_key_set": bool(segment_encrypted),
             "live_key_set": bool(live_key)}
@@ -3754,7 +3758,7 @@ async def get_ai_provider(request: Request):
             connections[connection] = bool(saved) or (connection == "openrouter" and bool(getattr(_env(request), "OPENROUTER_API_KEY", "")))
         return {"provider": config["ai_provider"], "model": config["ai_model"],
                 "base_url": config["ai_base_url"], "key_set": config["key_set"],
-                "model_valid": config["model_valid"], "connections": connections,
+                "model_valid": config["model_valid"], "model_recovered": config.get("model_recovered", False), "connections": connections,
                 "live_key_set": config["live_key_set"], "live_model": config["ai_live_model"],
                 "live_voice": config["ai_live_voice"], "enabled": config["key_set"] and config["model_valid"],
                 "live_enabled": False, "source": "workspace" if config["key_set"] else "none"}
@@ -3876,7 +3880,7 @@ async def ai_status(request: Request):
         config = await _ai_config(request, segment)
         return {"enabled": config["key_set"] and config["model_valid"], "live_enabled": False,
                 "provider": config["ai_provider"], "model": config["ai_model"],
-                "model_valid": config["model_valid"], "segment": segment,
+                "model_valid": config["model_valid"], "model_recovered": config.get("model_recovered", False), "segment": segment,
                 "segment_title": AI_SEGMENTS.get(segment, "Workspace")}
     except Exception:
         return {"enabled": False, "live_enabled": False, "provider": "", "model": ""}
