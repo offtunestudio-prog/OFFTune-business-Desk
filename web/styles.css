@@ -1185,3 +1185,54 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,[data-action]:fo
 
 .workspace-refreshing{position:sticky;top:0;z-index:5;padding:8px 12px;margin:0 0 10px;border-radius:10px;background:#eef3ff;color:#5267a8;font-size:11px;font-weight:600}
 #content.refreshing>*:not(.workspace-refreshing){opacity:.68}
+
+/* Dex AI control centre: clear shared defaults and optional per-area routing */
+.settings-ai-card{padding:clamp(16px,2vw,26px);border:1px solid rgba(119,93,190,.18);border-radius:20px;background:radial-gradient(ellipse at 90% 0%,rgba(147,112,214,.09),transparent 34%),var(--surface,#fff);box-shadow:0 14px 36px rgba(38,44,70,.07)}
+.settings-ai-card:before{height:4px}
+.settings-ai-card .settings-section-head{align-items:center;margin-bottom:20px}
+.settings-ai-card .settings-section-head h3{font-size:clamp(19px,2vw,25px);letter-spacing:-.025em}
+.settings-ai-card .settings-section-head p:not(.eyebrow){max-width:620px;font-size:12px;line-height:1.6}
+.ai-connection-form{padding:18px;border:1px solid rgba(122,102,181,.15);border-radius:16px;background:linear-gradient(135deg,rgba(123,98,192,.055),rgba(255,255,255,.64))}
+.ai-connection-intro{display:flex;align-items:center;gap:11px;margin-bottom:16px}
+.ai-connection-mark{display:grid;place-items:center;width:36px;height:36px;border-radius:12px;background:linear-gradient(145deg,#7056bd,#ac74d0);color:white;font-size:18px;box-shadow:0 5px 14px rgba(112,86,189,.24)}
+.ai-connection-intro>div{display:grid;gap:3px}.ai-connection-intro strong{font-size:13px;color:var(--text,#34435a)}.ai-connection-intro small,.ai-route-summary small{font-size:10px;color:var(--muted,#748197);line-height:1.45}
+.ai-connection-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.ai-connection-grid .settings-field{font-size:10px;gap:7px}
+.ai-connection-grid .settings-field input,.ai-connection-grid .settings-field select{min-height:42px;padding:10px 12px;border-radius:10px;font-size:11px}
+.ai-connection-grid .settings-field>small{font-size:9px;line-height:1.45}
+.ai-advanced-settings{margin-top:14px;border-top:1px solid rgba(122,102,181,.14);padding-top:12px}
+.ai-advanced-settings summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;color:#7056a8;font-size:11px;font-weight:800}
+.ai-advanced-settings summary::-webkit-details-marker{display:none}.ai-advanced-settings summary:after{content:"＋";font-size:15px}.ai-advanced-settings[open] summary:after{content:"−"}
+.ai-advanced-settings .ai-connection-grid{padding-top:15px}.ai-privacy-footnote{grid-column:1/-1;margin:0;color:var(--muted,#748197);font-size:9px;line-height:1.5}
+.ai-connection-actions,.ai-routing-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;padding-top:13px;border-top:1px solid rgba(122,102,181,.14)}
+.ai-connection-actions>span,.ai-routing-footer small{max-width:48ch;color:var(--muted,#748197);font-size:9px;line-height:1.5}
+.ai-connection-actions .button,.ai-routing-footer .button{min-height:37px;padding:9px 14px;font-size:10px}
+.ai-routing-editor{margin-top:22px;padding:18px;border:1px solid rgba(122,102,181,.15);border-radius:16px;background:var(--surface,#fff)}
+.ai-routing-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}
+.ai-routing-heading .eyebrow{margin:0 0 5px;color:#8b6bc1;font-size:8px;letter-spacing:.12em}
+.ai-routing-heading h4{margin:0;color:var(--text,#34435a);font-size:15px;letter-spacing:-.02em}
+.ai-routing-heading p:not(.eyebrow){max-width:600px;margin:6px 0 0;color:var(--muted,#748197);font-size:10px;line-height:1.5}
+.ai-route-count{flex:none;padding:6px 9px;border:1px solid rgba(122,102,181,.15);border-radius:999px;background:rgba(126,96,197,.07);color:#765ba9;font-size:9px;font-weight:800}
+.ai-route-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+.ai-route-row{min-width:0;padding:12px;border:1px solid var(--line,#e2e7ef);border-radius:12px;background:var(--surface,#fff);transition:border-color .16s,box-shadow .16s}
+.ai-route-row:focus-within{border-color:rgba(125,98,195,.45);box-shadow:0 0 0 3px rgba(125,98,195,.08)}
+.ai-route-summary{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.ai-route-summary>div{display:grid;gap:3px;min-width:0}.ai-route-summary strong{overflow:hidden;color:var(--text,#34435a);font-size:10px;text-overflow:ellipsis}
+.ai-route-toggle{display:flex;align-items:center;gap:6px;flex:none;color:var(--muted,#748197);font-size:9px;font-weight:700;cursor:pointer}
+.ai-route-toggle input{width:15px;height:15px;accent-color:#765abb}
+.ai-route-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:12px;padding-top:11px;border-top:1px solid rgba(122,102,181,.1)}
+.ai-route-fields>label{display:grid;gap:5px;min-width:0;color:var(--text,#526179);font-size:8px;font-weight:800}
+.ai-route-fields input,.ai-route-fields select{width:100%;min-width:0;min-height:34px;padding:7px 8px;border:1px solid var(--line,#e2e7ef);border-radius:8px;background:var(--surface,#fff);color:var(--text,#34435a);font:500 9px Manrope,sans-serif}
+.ai-route-fields input:focus,.ai-route-fields select:focus{outline:none;border-color:#8c72c3;box-shadow:0 0 0 3px rgba(125,98,195,.1)}
+.ai-route-fields .ai-route-endpoint,.ai-route-fields .ai-route-key{grid-column:1/-1}
+.ai-routing-footer{margin-top:13px}
+.ai-routing-footer small{max-width:60ch}
+.ai-routing-footer button{flex:none}
+.settings-ai-card>.settings-ai-privacy{margin-top:16px;padding:12px 14px}
+::root[data-theme="dark"] .settings-ai-card{background:radial-gradient(ellipse at 90% 0%,rgba(147,112,214,.12),transparent 34%),linear-gradient(145deg,rgba(28,29,40,.96),rgba(29,32,43,.92))}
+:root[data-theme="dark"] .ai-connection-form,:root[data-theme="dark"] .ai-routing-editor{border-color:rgba(181,151,244,.15);background:rgba(20,22,30,.52)}
+:root[data-theme="dark"] .ai-route-row{border-color:rgba(224,229,241,.12);background:rgba(26,29,39,.7)}
+:root[data-theme="dark"] .ai-route-summary strong,:root[data-theme="dark"] .ai-connection-intro strong,:root[data-theme="dark"] .ai-routing-heading h4{color:#eef1f7}
+:root[data-theme="dark"] .ai-route-fields input,:root[data-theme="dark"] .ai-route-fields select{border-color:rgba(224,229,241,.14);background:#171a22;color:#edf0f6}
+@media(max-width:720px){.ai-route-list{grid-template-columns:1fr}.ai-routing-heading{flex-direction:column}.ai-route-count{align-self:flex-start}}
+@media(max-width:520px){.ai-connection-grid,.ai-route-fields{grid-template-columns:1fr}.ai-connection-actions,.ai-routing-footer{align-items:stretch;flex-direction:column}.ai-connection-actions .button,.ai-routing-footer .button{align-self:flex-start}.ai-connection-actions>span,.ai-routing-footer small{max-width:none}}
