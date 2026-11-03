@@ -17,11 +17,38 @@ const titleCase = (s) => String(s || "").replaceAll("_", " ").replace(/\b\w/g, x
 
 const readCache=new Map();
 const pageSnapshots=new Map();
+const PAGE_SNAPSHOT_TTL=15*60*1000;
 let navigationGeneration=0;
+function pageSnapshotKey(){
+  const user=state.user;
+  if(!user?.id)return "";
+  const access=[user.role,user.permissions||[],user.data_permissions||[],user.access_features||[]];
+  return "offtune-page-snapshots-v1:"+user.id+":"+btoa(unescape(encodeURIComponent(JSON.stringify(access))));
+}
+function restorePageSnapshots(){
+  pageSnapshots.clear();
+  try{
+    const key=pageSnapshotKey(),saved=key&&JSON.parse(sessionStorage.getItem(key)||"null");
+    if(!saved||Date.now()-Number(saved.savedAt)>PAGE_SNAPSHOT_TTL||!saved.pages)return;
+    for(const [page,html] of Object.entries(saved.pages)){
+      if(typeof html==="string"&&html.length<1500000)pageSnapshots.set(page,html);
+    }
+  }catch{}
+}
+function persistPageSnapshots(){
+  try{
+    const key=pageSnapshotKey();
+    if(key)sessionStorage.setItem(key,JSON.stringify({savedAt:Date.now(),pages:Object.fromEntries(pageSnapshots)}));
+  }catch{}
+}
+function clearPageSnapshots(){
+  pageSnapshots.clear();
+  try{const key=pageSnapshotKey();if(key)sessionStorage.removeItem(key);}catch{}
+}
 async function api(path, options = {}) {
   const method=String(options.method||"GET").toUpperCase();
   const cacheable=method==="GET"&&path.startsWith("/api/")&&!path.startsWith("/api/auth/")&&path!=="/api/backup";
-  if(method!=="GET"){readCache.clear();pageSnapshots.clear();}
+  if(method!=="GET"){readCache.clear();clearPageSnapshots();}
   if(cacheable){
     const cached=readCache.get(path);
     if(cached&&cached.expires>Date.now()) return structuredClone(await cached.promise);
@@ -139,7 +166,7 @@ function showAuth(setup) {
 }
 async function enterApp() {
   readCache.clear();
-  pageSnapshots.clear();
+  restorePageSnapshots();
   $("#auth-screen").classList.add("hidden"); $("#app-shell").classList.remove("hidden");
   $("#app-shell").classList.toggle("role-manager",state.user.role==="manager");
   $("#app-shell").classList.toggle("role-employee",state.user.role==="employee");
@@ -322,7 +349,7 @@ async function navigate(page,initial=null) {
     else if (page === "team") await renderTeam(d);
     else if (page === "reports") await renderReports();
     else if (page === "settings") await renderSettings();
-    if(generation===navigationGeneration)pageSnapshots.set(page,content.innerHTML);
+    if(generation===navigationGeneration){pageSnapshots.set(page,content.innerHTML);persistPageSnapshots();}
   } catch (e) { if(generation===navigationGeneration)content.innerHTML = `<div class="notice error">${esc(e.message)}</div>`; }
   finally {
     clearTimeout(loadingTimer);
