@@ -1229,7 +1229,7 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,[data-action]:fo
 .ai-routing-footer small{max-width:60ch}
 .ai-routing-footer button{flex:none}
 .settings-ai-card>.settings-ai-privacy{margin-top:16px;padding:12px 14px}
-::root[data-theme="dark"] .settings-ai-card{background:radial-gradient(ellipse at 90% 0%,rgba(147,112,214,.12),transparent 34%),linear-gradient(145deg,rgba(28,29,40,.96),rgba(29,32,43,.92))}
+:root[data-theme="dark"] .settings-ai-card{background:radial-gradient(ellipse at 90% 0%,rgba(147,112,214,.12),transparent 34%),linear-gradient(145deg,rgba(28,29,40,.96),rgba(29,32,43,.92))}
 :root[data-theme="dark"] .ai-connection-form,:root[data-theme="dark"] .ai-routing-editor{border-color:rgba(181,151,244,.15);background:rgba(20,22,30,.52)}
 :root[data-theme="dark"] .ai-route-row{border-color:rgba(224,229,241,.12);background:rgba(26,29,39,.7)}
 :root[data-theme="dark"] .ai-route-summary strong,:root[data-theme="dark"] .ai-connection-intro strong,:root[data-theme="dark"] .ai-routing-heading h4{color:#eef1f7}
