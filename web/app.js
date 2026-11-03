@@ -1,4 +1,4 @@
-const state = { user: null, csrf: null, workspacePreview:false, workspaceOwnerName:"", teamMessages:[], messagePollTimer:null, designations:[], accessFeatures:[], dataAccessOptions:[], page: "overview", overviewPreset:"30d", overviewFrom:"", overviewTo:"", targetsMonth:"", targetData:null, collectionView:"all", collectionBatch:"all", collectionCourse:"all", financeSection:"overview", financeDays:30, financePastDueDays:30, financeUpcomingDays:30, followupFilter:"action", followupDetailOpen:null, collectionDueView:"month", collectionDueMonth:"", incentiveView:"overview", incentivePerson:null, incentivePayoutFilter:"unpaid", incentiveFrom:"", incentiveTo:"", incentiveDueFrom:"", incentiveDueTo:"", incentiveRules:{pool_rate:5,rep_rate:2,manager_rate:3,payout_due_days:30}, reportMonths:12, reportRange:"30d", reportFrom:"", reportTo:"", reportGroup:"day", data: {}, settings: {}, products: [], batches: [], orders: [], installments: [], team: [] };
+const state = { user: null, csrf: null, workspacePreview:false, workspaceOwnerName:"", teamMessages:[], messagePollTimer:null, designations:[], accessFeatures:[], dataAccessOptions:[], page: "overview", overviewPreset:"30d", overviewFrom:"", overviewTo:"", targetsMonth:"", targetData:null, collectionView:"all", collectionBatch:"all", collectionCourse:"all", financeSection:"overview", financeDays:30, financePastDueDays:30, financeUpcomingDays:30, followupFilter:"action", followupDetailOpen:null, collectionDueView:"month", collectionDueMonth:"", incentiveView:"overview", incentivePerson:null, incentivePayoutFilter:"unpaid", incentiveFrom:"", incentiveTo:"", incentiveDueFrom:"", incentiveDueTo:"", incentiveRules:{pool_rate:5,rep_rate:2,manager_rate:3,payout_due_days:30}, reportMonths:12, reportRange:"30d", reportFrom:"", reportTo:"", reportGroup:"day", data: {}, commonDataPromises: {}, settings: {}, products: [], batches: [], orders: [], installments: [], team: [] };
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const moneyFormatters = new Map();
@@ -214,12 +214,14 @@ function applyBrandLogo(dataUrl="") {
   $$('[data-q-brand]').forEach(img=>{if(img.getAttribute("src")!==source)img.src=source;});
 }
 async function loadCommon() {
-  [state.products,state.batches,state.orders,state.team] = await Promise.all([
-    api("/api/products").catch(()=>[]),
-    api("/api/batches").catch(()=>[]),
-    api("/api/orders").catch(()=>[]),
-    ["owner", "manager"].includes(state.user.role) ? api("/api/team").catch(()=>[]) : Promise.resolve([])
-  ]);
+  const promises={
+    products:api("/api/products").then(value=>{state.products=value;}).catch(()=>{state.products=[];}),
+    batches:api("/api/batches").then(value=>{state.batches=value;}).catch(()=>{state.batches=[];}),
+    orders:api("/api/orders").then(value=>{state.orders=value;}).catch(()=>{state.orders=[];}),
+    team:["owner","manager"].includes(state.user.role)?api("/api/team").then(value=>{state.team=value;}).catch(()=>{state.team=[];}):Promise.resolve([])
+  };
+  state.commonDataPromises=promises;
+  await Promise.all(Object.values(promises));
 }
 function navItems() {
   const employee=state.user.role==="employee";const items=[{id:"overview",label:"Overview",icon:"▦"},{id:employee?"my-goals":"targets",label:employee?"My goals":state.user.role==="manager"?"Team targets":"Targets",icon:"◎"},{id:"collections",label:"Finance Desk",icon:"↘"},{id:"followup",label:"Follow-up",icon:"◷"},{id:"products",label:"Products",icon:"◇"},{id:"incentives",label:employee?"My incentives":"Incentives",icon:"✦"},{id:"invoices",label:"Invoices",icon:"▤"},{id:"team",label:state.user.role==="owner"?"Team & access":"My team",icon:"♧"},{id:"reports",label:"Reports",icon:"▥"},{id:"batches",label:"Batches",icon:"▦"},{id:"analytics",label:"Course analytics",icon:"◉"},{id:"messages",label:"Messages",icon:"✉"},{id:"expenses",label:"Expenses",icon:"↗"},{id:"my-students",label:"My students",icon:"♧"}];
@@ -248,7 +250,8 @@ async function navigate(page,initial=null) {
     if(generation===navigationGeneration)content.innerHTML=`<div class="loading"><span></span>Loading your workspace</div>`;
   },initial?300:650);
   try {
-    if(page!=="overview"&&state.commonPromise)await state.commonPromise;
+    const commonDependencies={products:["products"],batches:["batches","orders"],analytics:["products","batches","orders"],collections:["products","batches","orders","team"],followup:["orders"],incentives:["orders"],team:["team"],reports:["orders"],settings:["team"]}[page]||[];
+    await Promise.all(commonDependencies.map(key=>state.commonDataPromises?.[key]).filter(Boolean));
     const needsDashboard = page === "overview" || page === "team";
     const range = page === "overview" ? initial?.range||overviewRange(state.overviewPreset) : null;
     const [freshDashboard, overview, targetCourses, messages] = await Promise.all([
