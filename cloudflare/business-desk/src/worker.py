@@ -3558,8 +3558,14 @@ async def _ai_secret_key(request):
     return str(raw)
 
 
+async def _ai_encryption_key(request):
+    secret = (await _ai_secret_key(request)).encode("utf-8")
+    digest = await crypto.subtle.digest("SHA-256", to_js(secret))
+    return Uint8Array.new(digest).to_py().tobytes()
+
+
 async def _ai_encrypt(request, value):
-    key_bytes = (await _ai_secret_key(request)).encode("utf-8")
+    key_bytes = await _ai_encryption_key(request)
     iv = secrets.token_bytes(12)
     crypto_key = await crypto.subtle.importKey("raw", to_js(key_bytes), to_js({"name": "AES-GCM"}, dict_converter=Object.fromEntries), False, to_js(["encrypt"]))
     ciphertext = await crypto.subtle.encrypt(to_js({"name": "AES-GCM", "iv": to_js(iv)}, dict_converter=Object.fromEntries), crypto_key, to_js(str(value).encode("utf-8")))
@@ -3570,7 +3576,7 @@ async def _ai_encrypt(request, value):
 async def _ai_decrypt(request, value):
     if not value:
         return ""
-    key_bytes = (await _ai_secret_key(request)).encode("utf-8")
+    key_bytes = await _ai_encryption_key(request)
     combined = base64.urlsafe_b64decode(str(value).encode("ascii"))
     iv, ciphertext = combined[:12], combined[12:]
     crypto_key = await crypto.subtle.importKey("raw", to_js(key_bytes), to_js({"name": "AES-GCM"}, dict_converter=Object.fromEntries), False, to_js(["decrypt"]))
@@ -3800,7 +3806,9 @@ async def ai_action(request: Request):
         if operation not in AI_ACTION_ROUTES or not isinstance(payload, dict):
             raise ValueError("This AI action is not supported")
         target_path, method = AI_ACTION_ROUTES[operation]
-        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        if len(body) > 20000:
+            raise ValueError("This confirmed action is too large to process")
         scope = dict(request.scope)
         scope["path"] = target_path
         scope["raw_path"] = target_path.encode("utf-8")
