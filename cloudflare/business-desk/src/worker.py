@@ -3937,22 +3937,66 @@ async def ai_chat(request: Request):
             {"role": "system", "content": system + "\nRole: " + user["role"] + "\nWorkspace area: " + AI_SEGMENTS.get(segment, "Workspace") + "\nWorkspace reference: " + context_json},
             *messages
         ], "temperature": 0.2, "max_tokens": 1200}
-        response = await fetch(endpoint, method="POST", body=json.dumps(payload),
-                               headers={"Authorization": "Bearer " + config["api_key"], "Content-Type": "application/json"})
+        try:
+            response = await asyncio.wait_for(
+                fetch(endpoint, method="POST", body=json.dumps(payload),
+                      headers={"Authorization": "Bearer " + config["api_key"], "Content-Type": "application/json"}),
+                timeout=45
+            )
+        except asyncio.TimeoutError:
+            return JSONResponse({"error": "The AI provider took too long to respond. Try again, or choose a faster model in Settings."}, status_code=504)
+        except Exception:
+            return JSONResponse({"error": "OFFTune Desk could not reach the selected AI provider. Check the provider connection and try again."}, status_code=502)
         if not response.ok:
-            return JSONResponse({"error": "The selected AI provider rejected the request. Check its key, model ID, and account access in Settings."}, status_code=502)
-        result = await response.json()
-        choices = result.get("choices", [])
-        content = str(choices[0].get("message", {}).get("content") or "") if choices else ""
+            status = int(getattr(response, "status", 0) or 0)
+            if status == 401:
+                message = "The provider rejected this API key. Check that the key is active and saved under the provider selected for this workspace area."
+            elif status == 403:
+                message = "The provider denied this request. Check model access, billing, and permissions for this API key."
+            elif status == 404:
+                message = "The selected model or provider endpoint was not found. Choose a model from the provider's available model list in Settings."
+            elif status == 429:
+                message = "The provider is rate-limiting this account or its quota is exhausted. Wait a little, check billing, or choose another model."
+            elif status >= 500:
+                message = "The AI provider is temporarily unavailable. Try again shortly."
+            else:
+                message = "The AI provider rejected this request. Check the selected provider, model, and key in Settings."
+            return JSONResponse({"error": message, "provider_status": status}, status_code=502)
+        try:
+            result = await response.json()
+        except Exception:
+            return JSONResponse({"error": "The AI provider returned an unreadable response. Check that the selected model supports chat completions."}, status_code=502)
+        choices = result.get("choices", []) if isinstance(result, dict) else []
+        first = choices[0] if choices and isinstance(choices[0], dict) else {}
+        reply = first.get("message") if isinstance(first.get("message"), dict) else {}
+        raw_content = reply.get("content") or ""
+        if isinstance(raw_content, list):
+            content = "".join(str(part.get("text") or "") if isinstance(part, dict) else str(part) for part in raw_content)
+        else:
+            content = str(raw_content)
+        if not content.strip():
+            reason = str(first.get("finish_reason") or "").lower()
+            if reason == "length":
+                message = "The selected model used its reply limit before returning an answer. Choose a model with a larger output limit."
+            else:
+                message = "The provider returned an empty reply. Check model compatibility and try again."
+            return JSONResponse({"error": message}, status_code=502)
+        candidate = content.strip()
+        if candidate.startswith("```"):
+            candidate = candidate.split("\n", 1)[-1]
+            if candidate.rstrip().endswith("```"):
+                candidate = candidate.rstrip()[:-3].rstrip()
+            if candidate.lower().startswith("json"):
+                candidate = candidate[4:].lstrip()
         parsed = None
         try:
-            start = content.find("{")
-            end = content.rfind("}")
-            parsed = json.loads(content[start:end + 1]) if start >= 0 and end > start else None
+            start = candidate.find("{")
+            end = candidate.rfind("}")
+            parsed = json.loads(candidate[start:end + 1]) if start >= 0 and end > start else None
         except (ValueError, TypeError):
             parsed = None
         if not isinstance(parsed, dict) or not isinstance(parsed.get("answer"), str):
-            return {"answer": content[:6000] or "The AI provider returned an empty response.", "model": config["ai_model"], "proposal": None}
+            return {"answer": content[:6000], "model": config["ai_model"], "proposal": None}
         proposal = parsed.get("proposal")
         if proposal is not None:
             if not isinstance(proposal, dict) or proposal.get("operation") not in AI_ACTION_ROUTES:
