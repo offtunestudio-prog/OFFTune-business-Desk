@@ -1847,10 +1847,17 @@ async function openAIAssistant(){
   });
   const agentWorkspaceContext=async()=>{
     const role=state.user?.role||"";
-    const [invoices,installments,targets]=await Promise.all([
+    const permissions=new Set(state.user?.permissions||[]);
+    const maySeeAnalytics=role==="owner"||permissions.has("analytics")||permissions.has("collections");
+    const maySeeExpenses=role==="owner"||canViewData("company-revenue");
+    const [invoices,installments,targets,courses,analyticsBatches,expenses,incentives]=await Promise.all([
       state.invoices?Promise.resolve(state.invoices):api("/api/invoices").catch(()=>[]),
       state.installments?Promise.resolve(state.installments):api("/api/installments").catch(()=>[]),
-      role==="employee"?api("/api/targets/self?month="+encodeURIComponent(today().slice(0,7))).catch(()=>null):api("/api/targets?month="+encodeURIComponent(today().slice(0,7))).catch(()=>null)
+      role==="employee"?api("/api/targets/self?month="+encodeURIComponent(today().slice(0,7))).catch(()=>null):api("/api/targets?month="+encodeURIComponent(today().slice(0,7))).catch(()=>null),
+      maySeeAnalytics?api("/api/analytics/courses").catch(()=>[]):Promise.resolve([]),
+      maySeeAnalytics?api("/api/analytics/batches").catch(()=>[]):Promise.resolve([]),
+      maySeeExpenses?api("/api/expenses").catch(()=>[]):Promise.resolve([]),
+      api("/api/commissions").catch(()=>[])
     ]);
     const manageableOrders=(state.orders||[]).filter(order=>role==="owner"||order.can_manage);
     const visibleOrderIds=new Set(manageableOrders.map(order=>Number(order.id)));
@@ -1858,18 +1865,24 @@ async function openAIAssistant(){
     const maySeeReceipts=role==="owner"||canViewData("payment-amounts");
     const maySeeBalances=role==="owner"||canViewData("outstanding-balances");
     const maySeeInvoiceValues=role==="owner"||canViewData("invoice-values");
-    const maySeeInvoices=role==="owner"||state.user?.role==="owner"||(state.user?.permissions||[]).includes("invoices");
+    const maySeeInvoices=role==="owner"||(state.user?.permissions||[]).includes("invoices");
+    const visibleInvoices=maySeeInvoices?(invoices||[]).filter(i=>visibleOrderIds.has(Number(i.order_id))).slice(0,40):[];
+    const safeOrders=manageableOrders.slice(0,30).map(o=>({id:o.id,order_no:o.order_no,customer_id:o.customer_id,customer:o.customer,employee_id:o.employee_id,employee:o.employee,date:o.date,...(maySeeSales?{total:o.total}:{}),...(maySeeReceipts?{received:o.received}:{}),...(maySeeBalances?{pending:o.pending}:{}),enrollment_status:o.enrollment_status,products:(o.products||[]).map(p=>({id:p.id,name:p.name,quantity:p.quantity,batch_id:p.batch_id,batch:p.batch}))}));
+    const visibleInstallments=(installments||[]).filter(i=>role==="owner"||i.can_manage).slice(0,40).map(i=>({id:i.id,order_id:i.order_id,order_no:i.order_no,customer:i.customer,label:i.label||i.number,due_date:i.due_date,...(maySeeReceipts?{amount:i.amount}:{}),...(maySeeBalances?{balance:i.balance}:{}),status:i.status}));
+    const reportSummary={order_count:manageableOrders.length,invoice_count:visibleInvoices.length,...(maySeeSales?{order_value:manageableOrders.reduce((n,o)=>n+Number(o.total||0),0)}:{}),...(maySeeReceipts?{received:manageableOrders.reduce((n,o)=>n+Number(o.received||0),0)}:{}),...(maySeeBalances?{pending:manageableOrders.reduce((n,o)=>n+Number(o.pending||0),0)}:{})};
+    const settings=state.settings||{};
+    const visibleIncentives=(incentives||[]).filter(item=>role!=="owner"||Number(item.employee_id)!==Number(state.user.id));
     return {role,section:state.page,dashboard:state.data.dashboard?{role:state.data.dashboard.role,summary:state.data.dashboard.overview||state.data.dashboard.summary||null}:null,
       products:(state.products||[]).slice(0,80).map(p=>({id:p.id,name:p.name,sku:p.sku,type:p.product_type||p.type,...(maySeeSales?{price:p.price}:{}),installment_allowed:p.installment_allowed})),
       batches:(state.batches||[]).slice(0,60).map(b=>({id:b.id,name:b.name,product_id:b.product_id,product:b.product,status:b.status})),
       team:(state.team||[]).slice(0,50).map(u=>({id:u.id,name:u.name,role:u.role,manager_id:u.manager_id})),
-      orders:manageableOrders.slice(0,30).map(o=>({id:o.id,order_no:o.order_no,customer_id:o.customer_id,customer:o.customer,employee_id:o.employee_id,employee:o.employee,date:o.date,...(maySeeSales?{total:o.total}:{}),...(maySeeReceipts?{received:o.received}:{}),...(maySeeBalances?{pending:o.pending}:{}),enrollment_status:o.enrollment_status,products:(o.products||[]).map(p=>({id:p.id,name:p.name,quantity:p.quantity,batch_id:p.batch_id,batch:p.batch}))})),
-      invoices:maySeeInvoices?(invoices||[]).filter(i=>visibleOrderIds.has(Number(i.order_id))).slice(0,40).map(i=>({id:i.id,invoice_no:i.invoice_no,order_id:i.order_id,order_no:i.order_no,customer:i.customer,status:i.status,...(maySeeInvoiceValues?{total:i.total,balance:i.balance}:{}),due_date:i.due_date})):[],
-      installments:(installments||[]).filter(i=>(role==="owner"||i.can_manage)).slice(0,40).map(i=>({id:i.id,order_id:i.order_id,order_no:i.order_no,customer:i.customer,label:i.label||i.number,due_date:i.due_date,...(maySeeReceipts?{amount:i.amount}:{}),...(maySeeBalances?{balance:i.balance}:{}),status:i.status})),targets,
-      reports:(reports||[]).slice(0,12),course_analytics:(courses||[]).slice(0,30),batch_analytics:(analyticsBatches||[]).slice(0,30),
-      expenses:(role==="owner"||canViewData("company-revenue"))?(expenses||[]).slice(0,30).map(x=>({date:x.date,category:x.category,amount:x.amount,description:x.description})):[],
-      incentives:(incentives||[]).slice(0,40).map(x=>({employee:x.employee,order_no:x.order_no,amount:x.amount,balance:x.balance,status:x.status})),
-      messages:(messages||[]).slice(0,20).map(x=>({id:x.id,direction:x.direction,subject:x.subject,completed:x.completed,remind_at:x.remind_at})),
+      orders:safeOrders,
+      invoices:visibleInvoices.map(i=>({id:i.id,invoice_no:i.invoice_no,order_id:i.order_id,order_no:i.order_no,customer:i.customer,status:i.status,...(maySeeInvoiceValues?{total:i.total,balance:i.balance}:{}),due_date:i.due_date})),
+      installments:visibleInstallments,targets,reports:[reportSummary],
+      course_analytics:(courses||[]).slice(0,30),batch_analytics:(analyticsBatches||[]).slice(0,30),
+      expenses:(role==="owner"||maySeeExpenses)?(expenses||[]).slice(0,30).map(x=>({date:x.date,category:x.category,...(role==="owner"?{amount:x.amount}:{}),description:x.description})):[],
+      incentives:visibleIncentives.slice(0,40).map(x=>({employee:x.employee,order_no:x.order_no,...(role==="owner"||canViewData("incentive-values")?{amount:x.amount,balance:x.balance}:{}),status:x.status})),
+      messages:(state.teamMessages||[]).slice(0,20).map(x=>({id:x.id,direction:x.direction,subject:x.subject,completed:x.completed,remind_at:x.remind_at})),
       business_settings:role==="owner"?{business_name:settings.business_name,currency:settings.currency,invoice_prefix:settings.invoice_prefix}:null};
   };
   form.onsubmit=async event=>{
