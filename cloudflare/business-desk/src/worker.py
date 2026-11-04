@@ -3756,7 +3756,7 @@ async def get_ai_provider(request: Request):
         for connection in (*AI_PROVIDER_URLS.keys(), "custom"):
             saved = await _setting(_env(request).DB, "ai_api_key_enc__" + connection, "")
             connections[connection] = bool(saved) or (connection == "openrouter" and bool(getattr(_env(request), "OPENROUTER_API_KEY", "")))
-        return {"provider": config["ai_provider"], "model": response_model,
+        return {"provider": config["ai_provider"], "model": config["ai_model"],
                 "base_url": config["ai_base_url"], "key_set": config["key_set"],
                 "model_valid": config["model_valid"], "model_recovered": config.get("model_recovered", False), "connections": connections,
                 "live_key_set": config["live_key_set"], "live_model": config["ai_live_model"],
@@ -3879,7 +3879,7 @@ async def ai_status(request: Request):
             segment = None
         config = await _ai_config(request, segment)
         return {"enabled": config["key_set"] and config["model_valid"], "live_enabled": bool(config.get("live_key_set") or (config.get("ai_provider") == "google" and config.get("key_set"))),
-                "provider": config["ai_provider"], "model": response_model,
+                "provider": config["ai_provider"], "model": config["ai_model"],
                 "model_valid": config["model_valid"], "model_recovered": config.get("model_recovered", False), "segment": segment,
                 "segment_title": AI_SEGMENTS.get(segment, "Workspace")}
     except Exception:
@@ -4029,7 +4029,7 @@ async def ai_chat(request: Request):
         )
         system_content = system + "\nRole: " + user["role"] + "\nWorkspace area: " + AI_SEGMENTS.get(segment, "Workspace") + "\nWorkspace reference: " + context_json
         endpoint = config["ai_base_url"].rstrip("/") + "/chat/completions"
-        payload = {"model": response_model, "messages": [
+        payload = {"model": config["ai_model"], "messages": [
             {"role": "system", "content": system_content},
             *messages
         ], "max_tokens": 1200}
