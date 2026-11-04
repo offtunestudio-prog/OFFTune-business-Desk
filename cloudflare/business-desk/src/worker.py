@@ -4028,17 +4028,38 @@ async def ai_chat(request: Request):
             "Do not invent API/model capability, pricing, or availability."
         )
         system_content = system + "\nRole: " + user["role"] + "\nWorkspace area: " + AI_SEGMENTS.get(segment, "Workspace") + "\nWorkspace reference: " + context_json
-        endpoint = config["ai_base_url"].rstrip("/") + "/chat/completions"
-        payload = {"model": config["ai_model"], "messages": [
-            {"role": "system", "content": system_content},
-            *messages
-        ], "max_tokens": 1200}
-        if config["ai_provider"] == "google" and config["ai_model"].lower().startswith("gemini-3"):
-            payload["reasoning_effort"] = "low"
-        else:
-            payload["temperature"] = 0.2
-        headers = {"Authorization": "Bearer " + config["api_key"], "Content-Type": "application/json"}
         is_google = config["ai_provider"] == "google"
+        google_native = is_google and config["ai_base_url"].lower().startswith("https://generativelanguage.googleapis.com/")
+        if google_native:
+            endpoint = "https://generativelanguage.googleapis.com/v1beta/models"
+            contents = []
+            for message in messages:
+                contents.append({
+                    "role": "model" if message["role"] == "assistant" else "user",
+                    "parts": [{"text": message["content"]}]
+                })
+            payload = {
+                "systemInstruction": {"parts": [{"text": system_content}]},
+                "contents": contents,
+                "generationConfig": {
+                    "maxOutputTokens": 1200,
+                    "responseMimeType": "application/json"
+                }
+            }
+        else:
+            endpoint = config["ai_base_url"].rstrip("/") + "/chat/completions"
+            payload = {"model": config["ai_model"], "messages": [
+                {"role": "system", "content": system_content},
+                *messages
+            ], "max_tokens": 1200}
+            if is_google and config["ai_model"].lower().startswith("gemini-3"):
+                payload["reasoning_effort"] = "low"
+            else:
+                payload["temperature"] = 0.2
+        if google_native:
+            headers = {"x-goog-api-key": config["api_key"], "Content-Type": "application/json"}
+        else:
+            headers = {"Authorization": "Bearer " + config["api_key"], "Content-Type": "application/json"}
         response_model = config["ai_model"]
         fallback_model = "gemini-3.5-flash-lite"
         fallback_attempted = False
@@ -4046,9 +4067,18 @@ async def ai_chat(request: Request):
 
         async def request_model(model, timeout):
             request_payload = dict(payload)
-            request_payload["model"] = model
+            if google_native:
+                clean_model = model.removeprefix("models/")
+                if clean_model.lower().startswith("gemini-3"):
+                    generation_config = dict(request_payload.get("generationConfig") or {})
+                    generation_config["thinkingConfig"] = {"thinkingLevel": "low"}
+                    request_payload["generationConfig"] = generation_config
+                model_endpoint = endpoint + "/" + clean_model + ":generateContent"
+            else:
+                request_payload["model"] = model
+                model_endpoint = endpoint
             return await asyncio.wait_for(
-                fetch(endpoint, method="POST", body=json.dumps(request_payload), headers=headers),
+                fetch(model_endpoint, method="POST", body=json.dumps(request_payload), headers=headers),
                 timeout=timeout
             )
 
@@ -4124,6 +4154,16 @@ async def ai_chat(request: Request):
             result = await response.json()
         except Exception:
             return JSONResponse({"error": "The AI provider returned an unreadable response."}, status_code=502)
+        if google_native and isinstance(result, dict):
+            candidates = result.get("candidates") or []
+            candidate = candidates[0] if candidates and isinstance(candidates[0], dict) else {}
+            content_obj = candidate.get("content") if isinstance(candidate.get("content"), dict) else {}
+            parts = content_obj.get("parts") or []
+            text_parts = [str(part.get("text") or "") for part in parts if isinstance(part, dict) and not part.get("thought")]
+            native_text = "".join(text_parts)
+            finish_reason = str(candidate.get("finishReason") or "").lower()
+            normalized_reason = "length" if finish_reason in ("max_tokens", "max_tokens_reached") else finish_reason
+            result = {"choices": [{"message": {"content": native_text}, "finish_reason": normalized_reason}]}
         choices = result.get("choices", []) if isinstance(result, dict) else []
         first = choices[0] if choices and isinstance(choices[0], dict) else {}
         reply = first.get("message") if isinstance(first.get("message"), dict) else {}
