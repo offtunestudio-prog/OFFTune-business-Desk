@@ -4063,7 +4063,7 @@ async def ai_chat(request: Request):
         response_model = config["ai_model"]
         fallback_model = "gemini-3.5-flash-lite"
         fallback_attempted = False
-        request_timeout = 20 if is_google else 45
+        request_timeout = 8 if is_google else 45
 
         async def request_model(model, timeout):
             request_payload = dict(payload)
@@ -4086,7 +4086,7 @@ async def ai_chat(request: Request):
             nonlocal response_model, fallback_attempted
             fallback_attempted = True
             try:
-                backup_response = await request_model(fallback_model, 20)
+                backup_response = await request_model(fallback_model, 15)
             except asyncio.TimeoutError:
                 return JSONResponse({"error": "The selected Gemini model did not respond, and the fast backup model also timed out. Check Google AI Studio model availability and quota."}, status_code=504)
             except Exception:
