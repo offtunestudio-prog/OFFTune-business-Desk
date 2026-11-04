@@ -4028,46 +4028,37 @@ async def ai_chat(request: Request):
             "Do not invent API/model capability, pricing, or availability."
         )
         system_content = system + "\nRole: " + user["role"] + "\nWorkspace area: " + AI_SEGMENTS.get(segment, "Workspace") + "\nWorkspace reference: " + context_json
-        google_native = config["ai_provider"] == "google"
-        if google_native:
-            from urllib.parse import quote
-            model_path = quote(config["ai_model"], safe="-_.")
-            endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" + model_path + ":generateContent"
-            payload = {
-                "systemInstruction": {"parts": [{"text": system_content}]},
-                "contents": [
-                    {"role": "model" if item["role"] == "assistant" else "user", "parts": [{"text": item["content"]}]}
-                    for item in messages
-                ],
-                "generationConfig": {"maxOutputTokens": 1200}
-            }
-            if config["ai_model"].lower().startswith("gemini-3"):
-                payload["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "low"}
-            headers = {"x-goog-api-key": config["api_key"], "Content-Type": "application/json"}
+        endpoint = config["ai_base_url"].rstrip("/") + "/chat/completions"
+        payload = {"model": config["ai_model"], "messages": [
+            {"role": "system", "content": system_content},
+            *messages
+        ], "max_tokens": 1200}
+        if config["ai_provider"] == "google" and config["ai_model"].lower().startswith("gemini-3"):
+            payload["reasoning_effort"] = "low"
         else:
-            endpoint = config["ai_base_url"] + "/chat/completions"
-            payload = {"model": config["ai_model"], "messages": [
-                {"role": "system", "content": system_content},
-                *messages
-            ], "temperature": 0.2, "max_tokens": 1200}
-            headers = {"Authorization": "Bearer " + config["api_key"], "Content-Type": "application/json"}
+            payload["temperature"] = 0.2
+        headers = {"Authorization": "Bearer " + config["api_key"], "Content-Type": "application/json"}
+        request_timeout = 20 if config["ai_provider"] == "google" else 45
         try:
             response = await asyncio.wait_for(
                 fetch(endpoint, method="POST", body=json.dumps(payload), headers=headers),
-                timeout=45
+                timeout=request_timeout
             )
         except asyncio.TimeoutError:
-            return JSONResponse({"error": "The AI provider took too long to respond. Try again, or choose a faster model in Settings."}, status_code=504)
+            return JSONResponse({"error": f"The AI provider did not answer within {request_timeout} seconds. Try again or choose a faster model in Settings."}, status_code=504)
         except Exception:
             return JSONResponse({"error": "OFFTune Desk could not reach the selected AI provider. Check the provider connection and try again."}, status_code=502)
         if not response.ok and int(getattr(response, "status", 0) or 0) in (500, 502, 503, 504):
+            retry_timeout = 8 if config["ai_provider"] == "google" else 30
             try:
                 await asyncio.sleep(0.25)
                 response = await asyncio.wait_for(
                     fetch(endpoint, method="POST", body=json.dumps(payload), headers=headers),
-                    timeout=30
+                    timeout=retry_timeout
                 )
             except asyncio.TimeoutError:
+                if config["ai_provider"] == "google":
+                    return JSONResponse({"error": "Google Gemini did not respond after one quick retry. Check the model's availability and Google AI Studio quota."}, status_code=504)
                 return JSONResponse({"error": "The AI provider stayed unavailable after an automatic retry. Try again shortly or choose another available model."}, status_code=504)
             except Exception:
                 return JSONResponse({"error": "OFFTune Desk could not reconnect to the AI provider after an automatic retry. Please try again."}, status_code=502)
@@ -4086,28 +4077,29 @@ async def ai_chat(request: Request):
                 message = f"The AI provider returned a server error (HTTP {status}) after an automatic retry. It may be overloaded; try again shortly or choose another available model."
             else:
                 message = "The AI provider rejected this request. Check the selected provider, model, and key in Settings."
+            try:
+                provider_error = await response.json()
+                provider_error = provider_error.get("error") if isinstance(provider_error, dict) else None
+                detail = str(provider_error.get("message") or "") if isinstance(provider_error, dict) else ""
+                detail = detail.replace(config["api_key"], "[hidden]").replace("\\n", " ").replace("\\r", " ").strip()
+                if detail and status not in (401, 403, 429):
+                    message += ": " + detail[:180]
+            except Exception:
+                pass
             return JSONResponse({"error": message, "provider_status": status}, status_code=502)
         try:
             result = await response.json()
         except Exception:
             return JSONResponse({"error": "The AI provider returned an unreadable response."}, status_code=502)
-        if google_native:
-            candidates = result.get("candidates", []) if isinstance(result, dict) else []
-            first = candidates[0] if candidates and isinstance(candidates[0], dict) else {}
-            candidate_content = first.get("content") if isinstance(first.get("content"), dict) else {}
-            parts = candidate_content.get("parts", [])
-            content = "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict))
-            reason = str(first.get("finishReason") or "").lower()
+        choices = result.get("choices", []) if isinstance(result, dict) else []
+        first = choices[0] if choices and isinstance(choices[0], dict) else {}
+        reply = first.get("message") if isinstance(first.get("message"), dict) else {}
+        raw_content = reply.get("content") or ""
+        if isinstance(raw_content, list):
+            content = "".join(str(part.get("text") or "") if isinstance(part, dict) else str(part) for part in raw_content)
         else:
-            choices = result.get("choices", []) if isinstance(result, dict) else []
-            first = choices[0] if choices and isinstance(choices[0], dict) else {}
-            reply = first.get("message") if isinstance(first.get("message"), dict) else {}
-            raw_content = reply.get("content") or ""
-            if isinstance(raw_content, list):
-                content = "".join(str(part.get("text") or "") if isinstance(part, dict) else str(part) for part in raw_content)
-            else:
-                content = str(raw_content)
-            reason = str(first.get("finish_reason") or "").lower()
+            content = str(raw_content)
+        reason = str(first.get("finish_reason") or "").lower()
         if not content.strip():
             if reason in ("length", "max_tokens"):
                 message = "The selected model used its reply limit before returning an answer. Choose a model with a larger output limit."
