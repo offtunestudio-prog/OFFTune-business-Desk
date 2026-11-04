@@ -3908,7 +3908,11 @@ async def ai_live_token(request: Request):
         key = config.get("live_key") or (config.get("api_key") if config.get("ai_provider") == "google" else "")
         if not key:
             return JSONResponse({"error": "Add a Google Gemini API key in Settings → OFFTune Dex AI to start live voice."}, status_code=503)
-        model = "models/gemini-3.8-live"
+        live_model = str(data.get("model") or "gemini-3.8-live").strip().removeprefix("models/")
+        supported_live_models = ("gemini-3.8-live", "gemini-3.8-live-extended-thinking", "gemini-3.1-flash-live-preview", "gemini-2.5-flash-native-audio-preview-12-2025")
+        if live_model not in supported_live_models:
+            return JSONResponse({"error": "Choose a supported Gemini Live voice model."}, status_code=400)
+        model = "models/" + live_model
         token_request = {
             "uses": 1,
             "expireTime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 15 * 60)),
@@ -3980,7 +3984,7 @@ async def ai_live_token(request: Request):
             }]},
             "tools": [{"functionDeclarations": function_declarations}],
         }
-        return {"token": token, "config": live_config, "model": "gemini-3.8-live"}
+        return {"token": token, "config": live_config, "model": live_model}
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception:
