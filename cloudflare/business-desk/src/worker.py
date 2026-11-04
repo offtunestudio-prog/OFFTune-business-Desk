@@ -3878,12 +3878,107 @@ async def ai_status(request: Request):
         if segment not in AI_SEGMENTS:
             segment = None
         config = await _ai_config(request, segment)
-        return {"enabled": config["key_set"] and config["model_valid"], "live_enabled": False,
+        return {"enabled": config["key_set"] and config["model_valid"], "live_enabled": bool(config.get("live_key_set") or (config.get("ai_provider") == "google" and config.get("key_set"))),
                 "provider": config["ai_provider"], "model": config["ai_model"],
                 "model_valid": config["model_valid"], "model_recovered": config.get("model_recovered", False), "segment": segment,
                 "segment_title": AI_SEGMENTS.get(segment, "Workspace")}
     except Exception:
         return {"enabled": False, "live_enabled": False, "provider": "", "model": ""}
+
+
+@app.post("/api/ai/live-token")
+async def ai_live_token(request: Request):
+    user, error = await _require_user(request, ("owner", "manager", "employee"))
+    if error:
+        return error
+    try:
+        data = await request.json()
+        if data.get("external_ai_consent") is not True:
+            return JSONResponse({"error": "Start live voice only after choosing to share microphone audio with Google Gemini."}, status_code=400)
+        segment = str(data.get("segment") or "")
+        if segment not in AI_SEGMENTS:
+            segment = None
+        config = await _ai_config(request, segment)
+        key = config.get("live_key") or (config.get("api_key") if config.get("ai_provider") == "google" else "")
+        if not key:
+            return JSONResponse({"error": "Add a Google Gemini API key in Settings → OFFTune Dex AI to start live voice."}, status_code=503)
+        model = "models/gemini-3.8-live"
+        token_request = {
+            "uses": 1,
+            "expireTime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 15 * 60)),
+            "newSessionExpireTime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 60)),
+        }
+        try:
+            response = await asyncio.wait_for(
+                fetch(
+                    "https://generativelanguage.googleapis.com/v1beta/auth_tokens",
+                    method="POST",
+                    body=json.dumps(token_request),
+                    headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+                ),
+                timeout=15,
+            )
+        except asyncio.TimeoutError:
+            return JSONResponse({"error": "Google took too long to prepare the live voice connection. Try again."}, status_code=504)
+        except Exception:
+            return JSONResponse({"error": "OFFTune Dex could not reach Google Live API. Check the saved key and provider access."}, status_code=502)
+        try:
+            result = await response.json()
+        except Exception:
+            result = {}
+        if not response.ok:
+            status = int(getattr(response, "status", 0) or 0)
+            provider_error = result.get("error") if isinstance(result, dict) else None
+            if isinstance(provider_error, dict):
+                detail = str(provider_error.get("message") or "")
+            else:
+                detail = str(provider_error or "")
+            detail = detail.replace(key, "[hidden]").replace("\n", " ").replace("\r", " ").strip()
+            if status == 401:
+                message = "Google rejected the saved API key. Check that the key is active and saved under the Google provider."
+            elif status == 403:
+                message = "Google denied Live API access for this key or project. Check Gemini API access and billing."
+            elif status == 404:
+                message = "Google could not find the Live API service for this project. Check the Gemini API key's project access."
+            elif status == 429:
+                message = "Google Live API quota is exhausted or rate-limited. Wait, check the project's quota, or use a different key."
+            else:
+                message = "Google Live API could not prepare a voice session" + (f" (HTTP {status})" if status else "")
+            if detail and status not in (401, 403, 429):
+                message += ": " + detail[:220]
+            return JSONResponse({"error": message}, status_code=502)
+        token = str(result.get("name") or "") if isinstance(result, dict) else ""
+        if not token:
+            return JSONResponse({"error": "Google returned no short-lived live session token. Check Live API access for this key."}, status_code=502)
+        function_declarations = [{
+            "name": "propose_workspace_action",
+            "description": "Prepare one action for review in OFFTune Business Desk. Never state that it is completed. The app will require the user to confirm it.",
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "operation": {"type": "STRING", "enum": list(AI_ACTION_ROUTES.keys())},
+                    "summary": {"type": "STRING"},
+                    "payload_json": {"type": "STRING", "description": "A JSON object containing the fields required for this operation."},
+                },
+                "required": ["operation", "summary", "payload_json"],
+            },
+        }]
+        live_config = {
+            "model": model,
+            "responseModalities": ["AUDIO"],
+            "sessionResumption": {},
+            "inputAudioTranscription": {},
+            "outputAudioTranscription": {},
+            "systemInstruction": {"parts": [{"text":
+                "You are OFFTune Dex, the live voice assistant for OFFTune Business Desk. Speak naturally and reply in Bengali, Hindi, or English, matching the user. Use workspace records only when the app sends them. If asked to change business data, call propose_workspace_action with a concise summary and JSON payload; never claim a change is complete. The app shows a separate confirmation button before any action runs. Never infer missing amounts, identities, dates, recipients, or destructive intent. Ask one short clarifying question when required information is missing."
+            }]},
+            "tools": [{"functionDeclarations": function_declarations}],
+        }
+        return {"token": token, "config": live_config, "model": "gemini-3.8-live"}
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception:
+        return JSONResponse({"error": "OFFTune Dex could not prepare the live voice session. Check the saved Google API key and try again."}, status_code=502)
 
 
 @app.post("/api/ai/chat")
