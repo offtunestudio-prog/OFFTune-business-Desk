@@ -3965,6 +3965,18 @@ async def ai_chat(request: Request):
             return JSONResponse({"error": "The AI provider took too long to respond. Try again, or choose a faster model in Settings."}, status_code=504)
         except Exception:
             return JSONResponse({"error": "OFFTune Desk could not reach the selected AI provider. Check the provider connection and try again."}, status_code=502)
+        if not response.ok and int(getattr(response, "status", 0) or 0) in (500, 502, 503, 504):
+            try:
+                await asyncio.sleep(0.25)
+                response = await asyncio.wait_for(
+                    fetch(endpoint, method="POST", body=json.dumps(payload), headers=headers),
+                    timeout=30
+                )
+            except asyncio.TimeoutError:
+                return JSONResponse({"error": "The AI provider stayed unavailable after an automatic retry. Try again shortly or choose another available model."}, status_code=504)
+            except Exception:
+                return JSONResponse({"error": "OFFTune Desk could not reconnect to the AI provider after an automatic retry. Please try again."}, status_code=502)
+
         if not response.ok:
             status = int(getattr(response, "status", 0) or 0)
             if status == 401:
@@ -3976,7 +3988,7 @@ async def ai_chat(request: Request):
             elif status == 429:
                 message = "The provider is rate-limiting this account or its quota is exhausted. Wait a little, check billing, or choose another model."
             elif status >= 500:
-                message = "The AI provider is temporarily unavailable. Try again shortly."
+                message = f"The AI provider returned a server error (HTTP {status}) after an automatic retry. It may be overloaded; try again shortly or choose another available model."
             else:
                 message = "The AI provider rejected this request. Check the selected provider, model, and key in Settings."
             return JSONResponse({"error": message, "provider_status": status}, status_code=502)
