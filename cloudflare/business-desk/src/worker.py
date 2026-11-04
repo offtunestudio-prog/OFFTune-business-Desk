@@ -4093,9 +4093,9 @@ async def ai_chat(request: Request):
         else:
             headers = {"Authorization": "Bearer " + config["api_key"], "Content-Type": "application/json"}
         response_model = config["ai_model"]
-        fallback_model = "gemini-3.5-flash-lite"
+        fallback_model = "gemini-2.5-flash-lite" if config["ai_model"].lower() == "gemini-3.5-flash-lite" else "gemini-3.5-flash-lite"
         fallback_attempted = False
-        request_timeout = 8 if is_google else 45
+        request_timeout = 20 if is_google else 45
 
         async def request_model(model, timeout):
             request_payload = dict(payload)
@@ -4145,7 +4145,7 @@ async def ai_chat(request: Request):
                 if isinstance(response, JSONResponse):
                     return response
             else:
-                retry_timeout = 8 if is_google else 30
+                retry_timeout = 20 if is_google else 30
                 try:
                     await asyncio.sleep(0.25)
                     response = await request_model(config["ai_model"], retry_timeout)
