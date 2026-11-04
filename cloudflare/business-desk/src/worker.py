@@ -3756,7 +3756,7 @@ async def get_ai_provider(request: Request):
         for connection in (*AI_PROVIDER_URLS.keys(), "custom"):
             saved = await _setting(_env(request).DB, "ai_api_key_enc__" + connection, "")
             connections[connection] = bool(saved) or (connection == "openrouter" and bool(getattr(_env(request), "OPENROUTER_API_KEY", "")))
-        return {"provider": config["ai_provider"], "model": config["ai_model"],
+        return {"provider": config["ai_provider"], "model": response_model,
                 "base_url": config["ai_base_url"], "key_set": config["key_set"],
                 "model_valid": config["model_valid"], "model_recovered": config.get("model_recovered", False), "connections": connections,
                 "live_key_set": config["live_key_set"], "live_model": config["ai_live_model"],
@@ -3879,7 +3879,7 @@ async def ai_status(request: Request):
             segment = None
         config = await _ai_config(request, segment)
         return {"enabled": config["key_set"] and config["model_valid"], "live_enabled": bool(config.get("live_key_set") or (config.get("ai_provider") == "google" and config.get("key_set"))),
-                "provider": config["ai_provider"], "model": config["ai_model"],
+                "provider": config["ai_provider"], "model": response_model,
                 "model_valid": config["model_valid"], "model_recovered": config.get("model_recovered", False), "segment": segment,
                 "segment_title": AI_SEGMENTS.get(segment, "Workspace")}
     except Exception:
@@ -4029,7 +4029,7 @@ async def ai_chat(request: Request):
         )
         system_content = system + "\nRole: " + user["role"] + "\nWorkspace area: " + AI_SEGMENTS.get(segment, "Workspace") + "\nWorkspace reference: " + context_json
         endpoint = config["ai_base_url"].rstrip("/") + "/chat/completions"
-        payload = {"model": config["ai_model"], "messages": [
+        payload = {"model": response_model, "messages": [
             {"role": "system", "content": system_content},
             *messages
         ], "max_tokens": 1200}
@@ -4038,30 +4038,61 @@ async def ai_chat(request: Request):
         else:
             payload["temperature"] = 0.2
         headers = {"Authorization": "Bearer " + config["api_key"], "Content-Type": "application/json"}
-        request_timeout = 20 if config["ai_provider"] == "google" else 45
-        try:
-            response = await asyncio.wait_for(
-                fetch(endpoint, method="POST", body=json.dumps(payload), headers=headers),
-                timeout=request_timeout
+        is_google = config["ai_provider"] == "google"
+        response_model = config["ai_model"]
+        fallback_model = "gemini-3.5-flash-lite"
+        fallback_attempted = False
+        request_timeout = 20 if is_google else 45
+
+        async def request_model(model, timeout):
+            request_payload = dict(payload)
+            request_payload["model"] = model
+            return await asyncio.wait_for(
+                fetch(endpoint, method="POST", body=json.dumps(request_payload), headers=headers),
+                timeout=timeout
             )
+
+        async def try_google_fallback():
+            nonlocal response_model, fallback_attempted
+            fallback_attempted = True
+            try:
+                backup_response = await request_model(fallback_model, 12)
+            except asyncio.TimeoutError:
+                return JSONResponse({"error": "The selected Gemini model did not respond, and the fast backup model also timed out. Check Google AI Studio model availability and quota."}, status_code=504)
+            except Exception:
+                return JSONResponse({"error": "The selected Gemini model failed, and OFFTune Desk could not reach Google's backup model. Try again shortly."}, status_code=502)
+            if backup_response.ok:
+                response_model = fallback_model
+            return backup_response
+
+        try:
+            response = await request_model(config["ai_model"], request_timeout)
         except asyncio.TimeoutError:
-            return JSONResponse({"error": f"The AI provider did not answer within {request_timeout} seconds. Try again or choose a faster model in Settings."}, status_code=504)
+            if is_google and config["ai_model"].lower() != fallback_model:
+                response = await try_google_fallback()
+                if isinstance(response, JSONResponse):
+                    return response
+            else:
+                return JSONResponse({"error": f"The AI provider did not answer within {request_timeout} seconds. Try again or choose a faster model in Settings."}, status_code=504)
         except Exception:
             return JSONResponse({"error": "OFFTune Desk could not reach the selected AI provider. Check the provider connection and try again."}, status_code=502)
+
         if not response.ok and int(getattr(response, "status", 0) or 0) in (500, 502, 503, 504):
-            retry_timeout = 8 if config["ai_provider"] == "google" else 30
-            try:
-                await asyncio.sleep(0.25)
-                response = await asyncio.wait_for(
-                    fetch(endpoint, method="POST", body=json.dumps(payload), headers=headers),
-                    timeout=retry_timeout
-                )
-            except asyncio.TimeoutError:
-                if config["ai_provider"] == "google":
-                    return JSONResponse({"error": "Google Gemini did not respond after one quick retry. Check the model's availability and Google AI Studio quota."}, status_code=504)
-                return JSONResponse({"error": "The AI provider stayed unavailable after an automatic retry. Try again shortly or choose another available model."}, status_code=504)
-            except Exception:
-                return JSONResponse({"error": "OFFTune Desk could not reconnect to the AI provider after an automatic retry. Please try again."}, status_code=502)
+            if is_google and config["ai_model"].lower() != fallback_model:
+                response = await try_google_fallback()
+                if isinstance(response, JSONResponse):
+                    return response
+            else:
+                retry_timeout = 8 if is_google else 30
+                try:
+                    await asyncio.sleep(0.25)
+                    response = await request_model(config["ai_model"], retry_timeout)
+                except asyncio.TimeoutError:
+                    if is_google:
+                        return JSONResponse({"error": "Google Gemini did not respond after one quick retry. Check the model's availability and Google AI Studio quota."}, status_code=504)
+                    return JSONResponse({"error": "The AI provider stayed unavailable after an automatic retry. Try again shortly or choose another available model."}, status_code=504)
+                except Exception:
+                    return JSONResponse({"error": "OFFTune Desk could not reconnect to the AI provider after an automatic retry. Please try again."}, status_code=502)
 
         if not response.ok:
             status = int(getattr(response, "status", 0) or 0)
@@ -4073,8 +4104,10 @@ async def ai_chat(request: Request):
                 message = "The selected model or provider endpoint was not found. Choose a model from the provider's available model list in Settings."
             elif status == 429:
                 message = "The provider is rate-limiting this account or its quota is exhausted. Wait a little, check billing, or choose another model."
+            elif status >= 500 and is_google and fallback_attempted:
+                message = f"Google Gemini returned HTTP {status} for both the selected model and the fast backup model ({fallback_model}). Check Google AI Studio service status, model access, and quota."
             elif status >= 500:
-                message = f"The AI provider returned a server error (HTTP {status}) after an automatic retry. It may be overloaded; try again shortly or choose another available model."
+                message = f"The AI provider returned a server error (HTTP {status}). It may be overloaded; try again shortly or choose another available model."
             else:
                 message = "The AI provider rejected this request. Check the selected provider, model, and key in Settings."
             try:
@@ -4121,7 +4154,7 @@ async def ai_chat(request: Request):
         except (ValueError, TypeError):
             parsed = None
         if not isinstance(parsed, dict) or not isinstance(parsed.get("answer"), str):
-            return {"answer": content[:6000], "model": config["ai_model"], "proposal": None}
+            return {"answer": content[:6000], "model": response_model, "proposal": None}
         proposal = parsed.get("proposal")
         if proposal is not None:
             if not isinstance(proposal, dict) or proposal.get("operation") not in AI_ACTION_ROUTES:
@@ -4131,7 +4164,7 @@ async def ai_chat(request: Request):
             else:
                 proposal = {"operation": proposal["operation"], "summary": str(proposal.get("summary") or "Review this workspace change")[:500],
                             "payload": proposal["payload"]}
-        return {"answer": parsed["answer"][:6000], "model": config["ai_model"], "proposal": proposal}
+        return {"answer": parsed["answer"][:6000], "model": response_model, "proposal": proposal}
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception:
