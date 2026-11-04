@@ -1384,3 +1384,8 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,[data-action]:fo
 @keyframes dex-live-spin{to{transform:rotate(360deg)}}
 @media(max-width:700px){.ai-workspace .ai-topbar{flex-wrap:wrap}.ai-workspace .ai-top-meta{display:flex!important;order:3;width:100%}.ai-workspace .ai-chat-model-switch{flex:1}.ai-workspace .ai-chat-model-switch input{width:100%;max-width:180px}.ai-workspace .ai-live-panel:not(.hidden){inset:6px;padding:18px}.ai-workspace .ai-live-orb-wrap{width:190px;height:190px}.ai-workspace .ai-live-orb{width:140px;height:140px}}
 @media(prefers-reduced-motion:reduce){.ai-workspace .ai-live-panel:not(.hidden),.ai-workspace .ai-live-panel:not(.hidden) *{animation:none!important}}
+
+.ai-workspace .ai-live-model{position:relative;z-index:2;display:flex;align-items:center;gap:10px;max-width:90%;padding:7px 10px 7px 16px;border:1px solid rgba(146,215,252,.32);border-radius:999px;background:rgba(5,25,59,.62);color:#b9dcf1;font:700 11px Manrope,sans-serif;letter-spacing:.05em}
+.ai-workspace .ai-live-model select{max-width:240px;padding:9px 30px 9px 12px;border:1px solid rgba(168,226,255,.4);border-radius:999px;background:#122e56;color:#f3fbff;font:700 12px Manrope,sans-serif}
+.ai-workspace .ai-live-model select:focus-visible{outline:2px solid #6ad4ff;outline-offset:2px}
+@media(max-width:700px){.ai-workspace .ai-live-model{flex-direction:column;border-radius:18px}.ai-workspace .ai-live-model select{max-width:100%}}
