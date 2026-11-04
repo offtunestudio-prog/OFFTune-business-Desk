@@ -3823,7 +3823,7 @@ async def remove_ai_provider_keys(request: Request):
 
 @app.get("/api/settings/ai-models")
 async def get_ai_models(request: Request):
-    user, error = await _require_user(request, ("owner",))
+    user, error = await _require_user(request, ("owner", "manager", "employee"))
     if error:
         return error
     try:
@@ -3878,9 +3878,15 @@ async def ai_status(request: Request):
         if segment not in AI_SEGMENTS:
             segment = None
         config = await _ai_config(request, segment)
+        db = _env(request).DB
+        providers = {}
+        for provider_name in ("google", "openrouter", "openai", "custom"):
+            saved = await _setting(db, "ai_api_key_enc__" + provider_name, "")
+            providers[provider_name] = bool(saved) or (provider_name == "openrouter" and bool(getattr(_env(request), "OPENROUTER_API_KEY", "")))
+        providers[config["ai_provider"]] = bool(config["key_set"])
         return {"enabled": config["key_set"] and config["model_valid"], "live_enabled": bool(config.get("live_key_set") or (config.get("ai_provider") == "google" and config.get("key_set"))),
                 "provider": config["ai_provider"], "model": config["ai_model"],
-                "model_valid": config["model_valid"], "model_recovered": config.get("model_recovered", False), "segment": segment,
+                "providers": providers, "model_valid": config["model_valid"], "model_recovered": config.get("model_recovered", False), "segment": segment,
                 "segment_title": AI_SEGMENTS.get(segment, "Workspace")}
     except Exception:
         return {"enabled": False, "live_enabled": False, "provider": "", "model": ""}
@@ -4011,6 +4017,32 @@ async def ai_chat(request: Request):
         if segment not in AI_SEGMENTS:
             segment = None
         config = await _ai_config(request, segment)
+        requested_provider = str(data.get("provider") or "").strip().lower()
+        requested_model = str(data.get("model") or "").strip()
+        if requested_provider or requested_model:
+            requested_provider = requested_provider or config["ai_provider"]
+            if requested_provider not in ("google", "openrouter", "openai", "custom"):
+                raise ValueError("Choose a supported AI provider")
+            if requested_provider == "google" and requested_model.lower().startswith("models/"):
+                requested_model = requested_model[7:]
+            if not requested_model or len(requested_model) > 200 or any(ord(ch) < 32 for ch in requested_model):
+                raise ValueError("Choose a text model for this conversation")
+            if not _ai_model_matches_provider(requested_provider, requested_model):
+                raise ValueError("Choose a text model that matches the selected provider")
+            if requested_provider != config["ai_provider"]:
+                if requested_provider == "custom":
+                    raise ValueError("Select the custom provider in Settings before using it in chat")
+                db = _env(request).DB
+                encrypted = await _setting(db, "ai_api_key_enc__" + requested_provider, "")
+                selected_key = await _ai_decrypt(request, encrypted) if encrypted else ""
+                if not selected_key and requested_provider == "openrouter":
+                    selected_key = str(getattr(_env(request), "OPENROUTER_API_KEY", "") or "")
+                if not selected_key:
+                    return JSONResponse({"error": "Connect this provider in Settings before selecting it in chat."}, status_code=409)
+                config = {**config, "ai_provider": requested_provider, "ai_base_url": AI_PROVIDER_URLS[requested_provider],
+                          "ai_model": requested_model, "api_key": selected_key, "key_set": True, "model_valid": True}
+            else:
+                config = {**config, "ai_model": requested_model, "model_valid": True}
         if not config["model_valid"]:
             return JSONResponse({"error": "The selected model does not match this area's provider. Choose a compatible model in Settings → OFFTune Dex AI."}, status_code=409)
         if not config["api_key"]:
