@@ -1868,6 +1868,7 @@ async function openAIAssistant(){
   form.onsubmit=async event=>{
     event.preventDefault();const input=form.message,button=form.querySelector("button[type=submit]"),text=input.value.trim();
     if(!text||!form.external_ai_consent.checked)return;
+    log.querySelector(".ai-welcome")?.remove();
     messages.push({role:"user",content:text});
     log.insertAdjacentHTML("beforeend",`<article class="ai-message user"><b>You</b><p>${esc(text)}</p></article>`);
     input.value="";button.disabled=true;input.disabled=true;log.insertAdjacentHTML("beforeend",`<article class="ai-message assistant ai-thinking"><b>OFFTune Dex AI</b><p>Thinking…</p></article>`);log.scrollTop=log.scrollHeight;
@@ -1885,6 +1886,8 @@ async function openAIAssistant(){
   };
   root.querySelectorAll("[data-ai-prompt]").forEach(chip=>chip.addEventListener("click",()=>{form.message.value=chip.dataset.aiPrompt||"";form.message.focus();}));
   const chatInput=form.message;chatInput.addEventListener("keydown",event=>{if(event.key==="Enter"&&!event.shiftKey){event.preventDefault();if(form.reportValidity())form.requestSubmit();}});
+  const resizeComposer=()=>{chatInput.style.height="auto";chatInput.style.height=Math.min(chatInput.scrollHeight,155)+"px";};
+  chatInput.addEventListener("input",resizeComposer);
   form.message.focus();
 }
 
