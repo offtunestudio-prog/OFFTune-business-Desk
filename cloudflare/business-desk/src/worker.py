@@ -3932,18 +3932,33 @@ async def ai_chat(request: Request):
             "For ordinary answers use proposal=null. Never claim an action completed; it only runs after the user presses the in-app confirmation button. "
             "Do not invent API/model capability, pricing, or availability."
         )
-        endpoint = config["ai_base_url"] + "/chat/completions"
-        payload = {"model": config["ai_model"], "messages": [
-            {"role": "system", "content": system + "\nRole: " + user["role"] + "\nWorkspace area: " + AI_SEGMENTS.get(segment, "Workspace") + "\nWorkspace reference: " + context_json},
-            *messages
-        ], "max_tokens": 1200}
-        # Gemini 3 models work best with generation defaults; other providers keep the app default.
-        if not (config["ai_provider"] == "google" and config["ai_model"].lower().startswith("gemini-3")):
-            payload["temperature"] = 0.2
+        system_content = system + "\nRole: " + user["role"] + "\nWorkspace area: " + AI_SEGMENTS.get(segment, "Workspace") + "\nWorkspace reference: " + context_json
+        google_native = config["ai_provider"] == "google"
+        if google_native:
+            from urllib.parse import quote
+            model_path = quote(config["ai_model"], safe="-_.")
+            endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" + model_path + ":generateContent"
+            payload = {
+                "systemInstruction": {"parts": [{"text": system_content}]},
+                "contents": [
+                    {"role": "model" if item["role"] == "assistant" else "user", "parts": [{"text": item["content"]}]}
+                    for item in messages
+                ],
+                "generationConfig": {"maxOutputTokens": 1200}
+            }
+            if config["ai_model"].lower().startswith("gemini-3"):
+                payload["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "low"}
+            headers = {"x-goog-api-key": config["api_key"], "Content-Type": "application/json"}
+        else:
+            endpoint = config["ai_base_url"] + "/chat/completions"
+            payload = {"model": config["ai_model"], "messages": [
+                {"role": "system", "content": system_content},
+                *messages
+            ], "temperature": 0.2, "max_tokens": 1200}
+            headers = {"Authorization": "Bearer " + config["api_key"], "Content-Type": "application/json"}
         try:
             response = await asyncio.wait_for(
-                fetch(endpoint, method="POST", body=json.dumps(payload),
-                      headers={"Authorization": "Bearer " + config["api_key"], "Content-Type": "application/json"}),
+                fetch(endpoint, method="POST", body=json.dumps(payload), headers=headers),
                 timeout=45
             )
         except asyncio.TimeoutError:
@@ -3968,18 +3983,26 @@ async def ai_chat(request: Request):
         try:
             result = await response.json()
         except Exception:
-            return JSONResponse({"error": "The AI provider returned an unreadable response. Check that the selected model supports chat completions."}, status_code=502)
-        choices = result.get("choices", []) if isinstance(result, dict) else []
-        first = choices[0] if choices and isinstance(choices[0], dict) else {}
-        reply = first.get("message") if isinstance(first.get("message"), dict) else {}
-        raw_content = reply.get("content") or ""
-        if isinstance(raw_content, list):
-            content = "".join(str(part.get("text") or "") if isinstance(part, dict) else str(part) for part in raw_content)
+            return JSONResponse({"error": "The AI provider returned an unreadable response."}, status_code=502)
+        if google_native:
+            candidates = result.get("candidates", []) if isinstance(result, dict) else []
+            first = candidates[0] if candidates and isinstance(candidates[0], dict) else {}
+            candidate_content = first.get("content") if isinstance(first.get("content"), dict) else {}
+            parts = candidate_content.get("parts", [])
+            content = "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict))
+            reason = str(first.get("finishReason") or "").lower()
         else:
-            content = str(raw_content)
-        if not content.strip():
+            choices = result.get("choices", []) if isinstance(result, dict) else []
+            first = choices[0] if choices and isinstance(choices[0], dict) else {}
+            reply = first.get("message") if isinstance(first.get("message"), dict) else {}
+            raw_content = reply.get("content") or ""
+            if isinstance(raw_content, list):
+                content = "".join(str(part.get("text") or "") if isinstance(part, dict) else str(part) for part in raw_content)
+            else:
+                content = str(raw_content)
             reason = str(first.get("finish_reason") or "").lower()
-            if reason == "length":
+        if not content.strip():
+            if reason in ("length", "max_tokens"):
                 message = "The selected model used its reply limit before returning an answer. Choose a model with a larger output limit."
             else:
                 message = "The provider returned an empty reply. Check model compatibility and try again."
