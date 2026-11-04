@@ -3936,7 +3936,10 @@ async def ai_chat(request: Request):
         payload = {"model": config["ai_model"], "messages": [
             {"role": "system", "content": system + "\nRole: " + user["role"] + "\nWorkspace area: " + AI_SEGMENTS.get(segment, "Workspace") + "\nWorkspace reference: " + context_json},
             *messages
-        ], "temperature": 0.2, "max_tokens": 1200}
+        ], "max_tokens": 1200}
+        # Gemini 3 models work best with generation defaults; other providers keep the app default.
+        if not (config["ai_provider"] == "google" and config["ai_model"].lower().startswith("gemini-3")):
+            payload["temperature"] = 0.2
         try:
             response = await asyncio.wait_for(
                 fetch(endpoint, method="POST", body=json.dumps(payload),
