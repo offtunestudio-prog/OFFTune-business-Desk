@@ -3984,6 +3984,8 @@ async def ai_live_token(request: Request):
             }]},
             "tools": [{"functionDeclarations": function_declarations}],
         }
+        if live_model == "gemini-3.8-live-extended-thinking":
+            live_config["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "LOW"}
         return {"token": token, "config": live_config, "model": live_model}
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
