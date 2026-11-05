@@ -3975,7 +3975,7 @@ async def ai_live_token(request: Request):
         }]
         live_config = {
             "model": model,
-            "responseModalities": ["AUDIO"],
+            "generationConfig": {"responseModalities": ["AUDIO"]},
             "sessionResumption": {},
             "inputAudioTranscription": {},
             "outputAudioTranscription": {},
