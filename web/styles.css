@@ -1455,3 +1455,21 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,[data-action]:fo
 .ai-workspace.is-live-mini .ai-live-proposal-details b{color:#f0fbff}
 .ai-workspace.is-live-mini .ai-live-proposal>small{color:#a9e4ff;font:650 10px Manrope,sans-serif;letter-spacing:0}
 @media(max-width:480px){.ai-modal.ai-workspace.is-live-mini{right:8px;bottom:8px;width:min(330px,calc(100vw - 16px));max-height:calc(100dvh - 16px)}.ai-workspace.is-live-mini .ai-live-panel:not(.hidden){max-height:calc(100dvh - 16px)}}
+
+
+/* Stable live voice dock: explicit expand/end controls and a persistent launcher cue. */
+.ai-workspace .ai-live-head{position:absolute;top:15px;left:18px;right:18px;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:10px;pointer-events:none}
+.ai-workspace .ai-live-head>*{pointer-events:auto}
+.ai-workspace .ai-live-head .ai-live-kicker{display:inline-flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid rgba(153,222,255,.25);border-radius:999px;background:rgba(10,34,67,.7);color:#b9eaff;font:800 10px Manrope,sans-serif;letter-spacing:.12em;white-space:nowrap}
+.ai-workspace .ai-live-head .ai-live-kicker:before{content:"";width:6px;height:6px;border-radius:50%;background:#62e4be;box-shadow:0 0 10px #62e4be}
+.ai-workspace .ai-live-head-actions{display:flex;align-items:center;gap:6px}
+.ai-workspace .ai-live-size,.ai-workspace .ai-live-head .ai-live-panel-close{position:static;display:inline-flex;align-items:center;justify-content:center;width:auto;min-width:52px;height:32px;margin:0;padding:0 10px;border:1px solid rgba(190,225,255,.3);border-radius:999px;background:rgba(255,255,255,.08);color:#e9f7ff;font:750 10px Manrope,sans-serif;cursor:pointer}
+.ai-workspace .ai-live-size:hover,.ai-workspace .ai-live-head .ai-live-panel-close:hover{background:rgba(180,226,255,.17)}
+.ai-workspace .ai-live-size:focus-visible,.ai-workspace .ai-live-head .ai-live-panel-close:focus-visible{outline:2px solid #8ddfff;outline-offset:2px}
+.ai-workspace.is-live-mini .ai-live-panel:not(.hidden){padding-top:56px}
+.ai-workspace.is-live-mini .ai-live-head{top:11px;left:11px;right:11px;gap:4px}
+.ai-workspace.is-live-mini .ai-live-head .ai-live-kicker{padding:6px 7px;font-size:8px;letter-spacing:.07em}
+.ai-workspace.is-live-mini .ai-live-size,.ai-workspace.is-live-mini .ai-live-head .ai-live-panel-close{height:27px;min-width:47px;padding:0 7px;font-size:9px}
+.ai-launch-button.is-live-docked{border-color:#83d8fa;box-shadow:0 0 0 3px rgba(83,190,234,.17),0 6px 20px rgba(18,103,150,.16)}
+.ai-launch-button.is-live-docked span:before{content:"●";display:inline-block;margin-right:5px;color:#39c79a;font-size:9px;vertical-align:middle}
+@media(max-width:480px){.ai-workspace.is-live-mini .ai-live-head .ai-live-kicker{font-size:7px}.ai-workspace.is-live-mini .ai-live-size,.ai-workspace.is-live-mini .ai-live-head .ai-live-panel-close{min-width:41px;font-size:8px}}
