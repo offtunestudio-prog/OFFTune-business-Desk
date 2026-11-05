@@ -1401,3 +1401,21 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,[data-action]:fo
 .ai-workspace .ai-live-check:hover{background:rgba(142,210,255,.22);transform:translateY(-1px)}
 .ai-workspace .ai-live-model{flex-wrap:wrap;justify-content:center}
 @media(max-width:700px){.ai-workspace .ai-live-panel:not(.hidden){inset:6px;padding:16px;gap:10px}.ai-workspace .ai-live-panel>strong{font-size:clamp(16px,4vw,22px)}}
+
+/* Quiet live conversation surface: one focal control, no oversized orbit decoration. */
+.ai-workspace .ai-live-panel:not(.hidden){gap:18px;background:radial-gradient(circle at 50% 46%,#193f67 0%,#142846 34%,#101d35 65%,#101827 100%);box-shadow:0 22px 50px rgba(11,24,47,.2);border-color:rgba(175,213,247,.25)}
+.ai-workspace .ai-live-panel:not(.hidden):before{display:none}
+.ai-workspace .ai-live-orb-wrap{width:184px;height:184px}
+.ai-workspace .ai-live-orb{width:152px;height:152px;border:1px solid rgba(190,236,255,.86);background:radial-gradient(circle at 32% 26%,#b7ecff 0,#70c9ed 20%,#247da9 51%,#173e69 77%,#142a4c 100%);box-shadow:0 0 0 8px rgba(130,213,250,.09),inset 0 0 24px rgba(217,247,255,.3),0 20px 48px rgba(19,153,209,.24);animation:dex-live-float 4s ease-in-out infinite}
+.ai-workspace .ai-live-orb:before{inset:-10px;border-color:rgba(139,211,247,.24);animation:none}
+.ai-workspace .ai-live-orb:after{display:none}
+.ai-workspace .ai-live-orb span{width:90px;height:90px;border-color:rgba(235,250,255,.45);background:rgba(14,49,80,.42)}
+.ai-workspace .ai-live-orb img{width:50px;height:50px}
+.ai-workspace .ai-live-orb[data-state="thinking"]{animation:dex-live-float 2.3s ease-in-out infinite}
+.ai-workspace .ai-live-orb[data-state="listening"]{animation:dex-live-listen 1.55s ease-in-out infinite}
+.ai-workspace .ai-live-panel>strong{max-width:88%;font:700 clamp(17px,2vw,23px) Manrope,sans-serif;line-height:1.35}
+.ai-workspace .ai-live-panel>small{font-size:11px;letter-spacing:.08em}
+.ai-workspace .ai-live-model{border-color:rgba(174,214,245,.22);background:rgba(13,34,61,.72)}
+.ai-workspace .ai-live-model select{background:#1a385c;border-color:rgba(174,214,245,.3)}
+.ai-workspace .ai-live-check{background:transparent;border-color:rgba(174,214,245,.28);color:#c4e5f8;font-weight:600}
+@media(max-width:700px){.ai-workspace .ai-live-orb-wrap{width:156px;height:156px}.ai-workspace .ai-live-orb{width:132px;height:132px}.ai-workspace .ai-live-panel:not(.hidden){gap:12px}}
