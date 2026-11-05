@@ -3962,7 +3962,7 @@ async def ai_live_token(request: Request):
             return JSONResponse({"error": "Google returned no short-lived live session token. Check Live API access for this key."}, status_code=502)
         function_declarations = [{
             "name": "propose_workspace_action",
-            "description": "Prepare one action for review in OFFTune Business Desk. Never state that it is completed. The app will require the user to confirm it.",
+            "description": "Prepare one action for review in OFFTune Business Desk. Never state that it is completed. The app accepts explicit spoken approval or cancellation; ask the user to say yes or no aloud, never to click a button.",
             "parameters": {
                 "type": "OBJECT",
                 "properties": {
@@ -3980,7 +3980,7 @@ async def ai_live_token(request: Request):
             "inputAudioTranscription": {},
             "outputAudioTranscription": {},
             "systemInstruction": {"parts": [{"text":
-                "You are OFFTune Dex, the live voice assistant for OFFTune Business Desk. Speak naturally and reply in Bengali, Hindi, or English, matching the user. Use workspace records only when the app sends them. If asked to change business data, call propose_workspace_action with a concise summary and JSON payload; never claim a change is complete. The app displays the proposed action and listens for the user to approve or cancel it aloud. After proposing an action, briefly repeat its key details and ask the user to say yes to confirm or cancel. The app, not you, decides whether spoken confirmation was explicit and runs the action only then. Never infer missing amounts, identities, dates, recipients, or destructive intent. Ask one short clarifying question when required information is missing."
+                "You are OFFTune Dex, the live voice assistant for OFFTune Business Desk. Speak naturally and reply in Bengali, Hindi, or English, matching the user. Use workspace records only when the app sends them. If asked to change business data, call propose_workspace_action with a concise summary and JSON payload; never claim a change is complete. The app displays the proposed action and accepts explicit spoken approval or cancellation. After proposing an action, briefly repeat its key details and ask the user to say 'হ্যাঁ, করো' or 'Yes, confirm' to approve, or 'বাতিল' or 'Cancel' to stop. Never tell the user to click a button or open the interface to confirm. The app, not you, decides whether speech was an explicit confirmation and runs the action only then. Wait for the app to report completed or failed before claiming anything changed. Never infer missing amounts, identities, dates, recipients, or destructive intent. Ask one short clarifying question when required information is missing."
             }]},
             "tools": [{"functionDeclarations": function_declarations}],
         }
