@@ -1796,14 +1796,14 @@ async function openAIAssistant(){
       if(!session.token||!session.config)throw new Error("Google did not return a voice session. Check the saved key.");
       const url="wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained?access_token="+encodeURIComponent(session.token);
       await new Promise((resolve,reject)=>{
-        const ws=new WebSocket(url);let finished=false;
+        const ws=new WebSocket(url);let finished=false,setupAccepted=false;
         const finish=error=>{if(finished)return;finished=true;clearTimeout(timer);try{ws.close(1000,"Connection check finished");}catch(_){}if(error)reject(error);else resolve(true);};
-        const timer=setTimeout(()=>finish(new Error("Voice setup took too long. Try another Live model or check Google service status.")),20000);
+        const timer=setTimeout(()=>finish(new Error(setupAccepted?"The voice model connected but did not return audio within 30 seconds. Check Google quota or try another model.":"Voice setup took too long. Try another Live model or check Google service status.")),30000);
         ws.onopen=()=>{try{ws.send(JSON.stringify({setup:session.config}));}catch(error){finish(error);}};
-        ws.onmessage=async event=>{try{const raw=typeof event.data==="string"?event.data:event.data instanceof Blob?await event.data.text():event.data instanceof ArrayBuffer?new TextDecoder().decode(event.data):String(event.data);const data=JSON.parse(raw);if(data.setupComplete)finish();else if(data.error)finish(new Error(String(data.error.message||data.error.status||"Google rejected voice setup").slice(0,220)));}catch(error){finish(error);}};
-        ws.onclose=event=>{if(finished)return;let reason=String(event.reason||"");reason=reason.replaceAll(session.token,"[hidden]").replace(/[\r\n]+/g," ").slice(0,220);finish(new Error(reason?`Google rejected voice setup (${event.code}): ${reason}`:`Google closed voice setup (${event.code}). Try another Live model.`));};
+        ws.onmessage=async event=>{try{const raw=typeof event.data==="string"?event.data:event.data instanceof Blob?await event.data.text():event.data instanceof ArrayBuffer?new TextDecoder().decode(event.data):String(event.data);const data=JSON.parse(raw);if(data.error){finish(new Error(String(data.error.message||data.error.status||"Google rejected voice setup").slice(0,220)));return;}if(data.setupComplete&&!setupAccepted){setupAccepted=true;setLiveState("Connected · checking a short AI voice reply…","thinking");ws.send(JSON.stringify({clientContent:{turns:[{role:"user",parts:[{text:"Say a brief greeting in Bengali."}]}],turnComplete:true}}));return;}if(data.serverContent?.modelTurn?.parts?.some(part=>part.inlineData?.data))finish();}catch(error){finish(error);}};
+        ws.onclose=event=>{if(finished)return;let reason=String(event.reason||"");reason=reason.replaceAll(session.token,"[hidden]").replace(/[\r\n]+/g," ").slice(0,220);finish(new Error(reason?`Google closed voice (${event.code}): ${reason}`:`Google closed voice (${event.code}). Try another Live model.`));};
       });
-      setLiveState("Connection ready · tap the orb to speak","ready");
+      setLiveState("Voice reply verified · tap the orb to speak","ready");
     }catch(error){setLiveState(String(error.message||"Voice check failed").slice(0,260),"error");}
     finally{liveCheck.disabled=false;liveOrb.disabled=false;liveModelPicker.disabled=false;}
   };
