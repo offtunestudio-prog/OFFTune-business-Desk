@@ -1688,7 +1688,8 @@ async function openAIAssistant(){
     const text=String(spoken||"").toLocaleLowerCase().normalize("NFKC").replace(/[^\p{L}\p{M}\p{N}\s]/gu," ").replace(/\s+/g," ").trim();
     const negative=/(?:^|\s)(?:no|nope|cancel|stop|never mind|do not|dont|don t|not now|না|নাহ|বাতিল|বাদ|থামো|পাঠিও না|করো না|এখন না|এখনও না|নিশ্চিত নই|नहीं|नही|अभी नहीं|मत|रद्द|nahi|nahin|mat karo)(?=\s|$)/u.test(text);
     const affirmative=/^(?:yes|yeah|yep|yup|okay|ok|confirm|confirmed|approve|approved|go ahead|proceed|do it|send it|send invoice|i confirm|হ্যাঁ|হ্যা|জি|ঠিক আছে|করো|করে দাও|করুন|পাঠাও|পাঠিয়ে দাও|পাঠিয়ে দাও|সম্মতি|অনুমতি|নিশ্চিত|আমি confirm|আমি অনুমতি দিচ্ছি|আমি রাজি|হ্যাঁ আমি|हाँ|हां|जी|ठीक है|करो|कर दीजिए|भेजो|पुष्टि|मैं पुष्टि|haan|han|theek hai|karo|kar do|bhejo)(?:\s+(?:please|now|it|do it|confirm|confirmed|send|invoice|send it|send invoice|i confirm|করে দাও|পাঠাও|পাঠিয়ে দাও|পাঠিয়ে দাও|আমি confirm করলাম|আমি confirm করছি|আমি নিশ্চিত করছি|করুন|এখনই|করো|भेजो|पुष्टि|अभी))*$/u.test(text);
-    if(!negative&&!affirmative)return false;
+    const explicitBengali=/(?:^|\s)(?:হ্যাঁ|হ্যা|জি)\s+(?:(?:আমি|তুমি|আপনি)\s+)?(?:কনফার্ম|নিশ্চিত|অনুমোদন)(?:\s+(?:করো|করুন|করে দাও|করছি|করলাম))?(?:\s|$)|(?:^|\s)আমি\s+(?:নিশ্চিত|কনফার্ম|অনুমোদন)\s+(?:করছি|করলাম)(?:\s|$)/u.test(text);
+    if(!negative&&!affirmative&&!explicitBengali)return false;
     const buttons=[...log.querySelectorAll(negative?"[data-ai-action-cancel]":"[data-ai-action-confirm]")];
     const button=buttons.at(-1);
     if(!button||button.disabled)return false;
@@ -1875,7 +1876,7 @@ async function openAIAssistant(){
       return;
     }
     const endpoint=agentEndpoints[proposal.operation];if(!endpoint)return;
-    const button=event.target.closest("[data-ai-action-confirm]");button.disabled=true;voiceStatus.textContent="Completing the confirmed action…";
+    const button=event.target.closest("[data-ai-action-confirm]");button.disabled=true;voiceStatus.textContent="Completing the confirmed action…";setLiveState("Completing the confirmed action…","thinking");
     try{
       const result=await post("/api/ai/action",{operation:proposal.operation,payload:proposal.payload});pendingAiAction=null;clearLiveProposal();event.target.closest(".ai-action-proposal")?.remove();
       const completion=proposal.operation==="record_sale"?"Sale saved. Its invoice draft is ready in Invoices.":proposal.operation==="send_invoice"?"Invoice email submitted to the delivery queue.":proposal.operation==="create_invoice"?"Invoice draft created.":(actionLabels[proposal.operation]||"Action")+" completed.";
