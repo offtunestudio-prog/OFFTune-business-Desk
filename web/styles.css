@@ -1389,3 +1389,15 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,[data-action]:fo
 .ai-workspace .ai-live-model select{max-width:240px;padding:9px 30px 9px 12px;border:1px solid rgba(168,226,255,.4);border-radius:999px;background:#122e56;color:#f3fbff;font:700 12px Manrope,sans-serif}
 .ai-workspace .ai-live-model select:focus-visible{outline:2px solid #6ad4ff;outline-offset:2px}
 @media(max-width:700px){.ai-workspace .ai-live-model{flex-direction:column;border-radius:18px}.ai-workspace .ai-live-model select{max-width:100%}}
+
+/* Voice stage fills the conversation, with controls available before microphone permission. */
+.ai-workspace .ai-conversation{height:100%;max-height:100%;min-height:0;box-sizing:border-box;overflow:hidden}
+.ai-workspace .ai-live-panel:not(.hidden){width:auto;max-width:none;box-sizing:border-box;inset:12px;gap:14px;padding:clamp(18px,2vw,28px)}
+.ai-workspace .ai-live-orb{appearance:none;cursor:pointer;color:inherit;transition:box-shadow .25s ease,filter .25s ease}
+.ai-workspace .ai-live-orb:hover{filter:brightness(1.16)}
+.ai-workspace .ai-live-orb:focus-visible,.ai-workspace .ai-live-check:focus-visible{outline:3px solid #9ae8ff;outline-offset:4px}
+.ai-workspace .ai-live-orb:disabled{cursor:wait;opacity:.85}
+.ai-workspace .ai-live-check{position:relative;z-index:2;padding:10px 15px;border:1px solid rgba(165,224,255,.45);border-radius:999px;background:rgba(142,210,255,.11);color:#d7f2ff;font:700 12px Manrope,sans-serif;letter-spacing:.01em;transition:background .2s ease,transform .2s ease}
+.ai-workspace .ai-live-check:hover{background:rgba(142,210,255,.22);transform:translateY(-1px)}
+.ai-workspace .ai-live-model{flex-wrap:wrap;justify-content:center}
+@media(max-width:700px){.ai-workspace .ai-live-panel:not(.hidden){inset:6px;padding:16px;gap:10px}.ai-workspace .ai-live-panel>strong{font-size:clamp(16px,4vw,22px)}}
