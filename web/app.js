@@ -1810,10 +1810,9 @@ async function openAIAssistant(){
               liveProcessor.onaudioprocess=audioEvent=>{const output=audioEvent.outputBuffer.getChannelData(0);output.fill(0);if(liveSocket?.readyState!==WebSocket.OPEN)return;const input=audioEvent.inputBuffer.getChannelData(0),ratio=liveContext.sampleRate/16000,count=Math.floor(input.length/ratio),resampled=new Float32Array(count);for(let i=0;i<count;i++)resampled[i]=input[Math.floor(i*ratio)];liveSend({realtimeInput:{audio:{mimeType:"audio/pcm;rate=16000",data:pcm16Base64(resampled)}}});};
               liveSource.connect(liveProcessor);liveProcessor.connect(liveContext.destination);
             }catch(error){console.error("Live voice audio setup failed",error);stopLive(false);setLiveState("The voice service connected, but this browser could not start microphone audio. Check the microphone and try again.","error");return;}
-            if(!shareWorkspaceData)return;
             phase="loading limited workspace context";
             let context=null;
-            if(shareWorkspaceData){try{context=await agentWorkspaceContext();}
+            if(shareWorkspaceData){try{context=await getWorkspaceContext();}
             catch(error){console.error("Live voice workspace context unavailable",error);const notice=document.createElement("article");notice.className="ai-message assistant ai-error";notice.innerHTML="<b>Workspace context unavailable</b><p>Live voice is connected, but section data could not be loaded. You can still ask general questions.</p>";log.append(notice);log.scrollTop=log.scrollHeight;}}
             phase="sending initial workspace context";
             liveSend({clientContent:{turns:[{role:"user",parts:[{text:context?"Read this limited, role-filtered workspace reference silently. Use it only to answer my next spoken request. Never take an action without a separate in-app proposal and confirmation. Do not recite these records unless I ask. Workspace reference: "+JSON.stringify(context):"No workspace records have been shared. Answer general questions. Never take an action without a separate in-app proposal and confirmation."}]},{role:"user",parts:[{text:"Begin this new voice conversation with one short, warm greeting in Bengali. Do not greet in English by default. After the greeting, wait for the user's request and match their spoken language in Bengali, Hindi, or English."}]}],turnComplete:true}});
@@ -1922,7 +1921,7 @@ async function openAIAssistant(){
       const completion=proposal.operation==="record_sale"?"Sale saved. Its invoice draft is ready in Invoices.":proposal.operation==="send_invoice"?"Invoice email submitted to the delivery queue.":proposal.operation==="create_invoice"?"Invoice draft created.":(actionLabels[proposal.operation]||"Action")+" completed.";
       liveSend({realtimeInput:{text:"The user confirmed the proposed action and it completed successfully. Briefly acknowledge this in the user’s language."}});
       const item=document.createElement("article");item.className="ai-message assistant";const heading=document.createElement("b");heading.textContent="Completed";const text=document.createElement("p");text.textContent=completion+(result?.invoice_no?" "+result.invoice_no:"");item.append(heading,text);log.append(item);
-      showActivity("done",proposal.operation==="record_sale"?"Sale verified":"Change saved",completion+(result?.order_no?" "+result.order_no:""));await loadCommon();await navigate(state.page);voiceStatus.textContent=completion;setLiveState(completion,"ready");
+      showActivity("done",proposal.operation==="record_sale"?"Sale verified":"Change saved",completion+(result?.order_no?" "+result.order_no:""));await loadCommon();getWorkspaceContext(true).catch(()=>{});await navigate(state.page);voiceStatus.textContent=completion;setLiveState(completion,"ready");
     }catch(error){button.disabled=false;const reason=String(error?.message||"The workspace rejected this change").slice(0,180);showActivity("failed","Action not completed",reason);voiceStatus.textContent=reason;setLiveState("Action not completed · "+reason.slice(0,140),"error");const item=document.createElement("article");item.className="ai-message assistant ai-error";const heading=document.createElement("b");heading.textContent="Action not completed";const text=document.createElement("p");text.textContent=reason;item.append(heading,text);log.append(item);liveSend({realtimeInput:{text:"The confirmed workspace action failed. Nothing was saved. Explain this validation error briefly in the user's language and ask for the missing or corrected information: "+reason}});}
     log.scrollTop=log.scrollHeight;
   });
@@ -1967,6 +1966,9 @@ async function openAIAssistant(){
       messages:(state.teamMessages||[]).slice(0,20).map(x=>({id:x.id,direction:x.direction,subject:x.subject,completed:x.completed,remind_at:x.remind_at})),
       business_settings:role==="owner"?{business_name:settings.business_name,currency:settings.currency,invoice_prefix:settings.invoice_prefix}:null};
   };
+  let workspaceContextPromise=null;
+  const getWorkspaceContext=(refresh=false)=>{if(refresh||!workspaceContextPromise)workspaceContextPromise=agentWorkspaceContext().catch(error=>{workspaceContextPromise=null;throw error;});return workspaceContextPromise;};
+  if(shareWorkspaceData)getWorkspaceContext().catch(()=>{});
   form.onsubmit=async event=>{
     event.preventDefault();const input=form.message,button=form.querySelector("button[type=submit]"),text=input.value.trim();
     if(!text)return;
@@ -1975,7 +1977,7 @@ async function openAIAssistant(){
     log.insertAdjacentHTML("beforeend",`<article class="ai-message user"><b>You</b><p>${esc(text)}</p></article>`);
     input.value="";button.disabled=true;input.disabled=true;log.insertAdjacentHTML("beforeend",`<article class="ai-message assistant ai-thinking"><b>OFFTune Dex AI</b><p>Thinking…</p></article>`);log.scrollTop=log.scrollHeight;
     try{
-      const response=await post("/api/ai/chat",{messages:messages.slice(-10),workspace_context:shareWorkspaceData?await agentWorkspaceContext():{},external_ai_consent:true,segment:aiSegment,provider:providerPicker?.value||status.provider,model:modelPicker?.value.trim()||status.model});
+      const response=await post("/api/ai/chat",{messages:messages.slice(-10),workspace_context:shareWorkspaceData?await getWorkspaceContext(true):{},external_ai_consent:true,segment:aiSegment,provider:providerPicker?.value||status.provider,model:modelPicker?.value.trim()||status.model});
       messages.push({role:"assistant",content:response.answer});
       log.querySelector(".ai-thinking")?.remove();
       log.insertAdjacentHTML("beforeend",`<article class="ai-message assistant"><b>OFFTune Dex AI · ${esc(response.model)}</b><div class="ai-answer">${renderAIAnswer(response.answer)}</div></article>`);
