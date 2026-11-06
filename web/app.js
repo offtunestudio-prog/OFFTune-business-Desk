@@ -1677,6 +1677,7 @@ async function openAIAssistant(){
   const showActivity=(phase,title,detail="")=>{activity.classList.remove("hidden");activity.dataset.phase=phase;activity.replaceChildren();const mark=document.createElement("span");mark.className="ai-activity-mark";mark.textContent=phase==="done"?"✓":phase==="failed"?"!":phase==="saving"?"↻":"•";const body=document.createElement("div");const heading=document.createElement("strong");heading.textContent=title;const line=document.createElement("p");line.textContent=detail;body.append(heading,line);activity.append(mark,body);};
   const validateAiProposal=proposal=>{
     if(proposal.operation!=="record_sale")return "";
+    if(!(state.products||[]).some(p=>p.active!==false))return "There are no products in the catalog yet. Add a priced product before recording a sale.";
     const payload=proposal.payload||{};
     if(typeof payload.customer==="string")payload.customer={name:payload.customer};
     if(!String(payload.customer?.name||"").trim())return "I need the customer's name before I can record the sale.";
@@ -1756,13 +1757,14 @@ async function openAIAssistant(){
     const calls=[...(message?.toolCall?.functionCalls||[]),...parts.map(part=>part?.functionCall).filter(Boolean)];
     if(calls.length){
       let accepted=false;
-      const functionResponses=calls.map(call=>{
+      const functionResponses=await Promise.all(calls.map(async call=>{
         let proposal=call.args||{};if(typeof proposal==="string"){try{proposal=JSON.parse(proposal);}catch(_){proposal={};}} if(typeof proposal.payload_json==="string"){try{proposal.payload=JSON.parse(proposal.payload_json);}catch(_){proposal={};}}
         let result={status:"unsupported_or_incomplete_proposal"};
-        if(call.name==="propose_workspace_action"&&proposal.operation&&proposal.payload&&proposal.summary&&!pendingAiAction&&!accepted){const validation=validateAiProposal(proposal);if(validation){result={status:"missing_or_invalid_details",message:validation};showActivity("failed","More details needed",validation);setLiveState(validation,"error");}else{showProposal(proposal);accepted=true;result={status:"waiting_for_user_confirmation",summary:proposal.summary,approval_instruction:"Repeat the exact proposed action briefly and ask the user to say yes to confirm or cancel. Wait for the spoken answer."};setLiveState("Say yes to confirm or cancel","ready");}}
+        if(call.name==="lookup_workspace_data"){if(!shareWorkspaceData)result={status:"workspace_data_off",message:"Workspace data sharing is off. Ask the user to turn it on before answering with business records."};else{try{const ctx=await getWorkspaceContext(true);const section=String(proposal.section||"overview");const keys={overview:["dashboard","reports","targets","orders","emi_this_month"],targets:["targets","reports"],collections:["orders","invoices","installments","emi_this_month","reports"],finance:["orders","invoices","installments","emi_this_month","reports"],followup:["installments","emi_this_month"],products:["products","batches"],incentives:["incentives"],invoices:["invoices","orders"],team:["team"],reports:["reports","dashboard","course_analytics","batch_analytics"],batches:["batches","products"],analytics:["course_analytics","batch_analytics","reports"],messages:["messages"],expenses:["expenses","reports"],settings:["business_settings"]}[section]||["dashboard","reports","emi_this_month"];result={status:"ok",section,as_of:today(),data:Object.fromEntries(keys.map(key=>[key,ctx[key]]))};}catch(_){result={status:"unavailable",message:"Workspace records could not be loaded right now."};}}}
+        else if(call.name==="propose_workspace_action"&&proposal.operation&&proposal.payload&&proposal.summary&&!pendingAiAction&&!accepted){const validation=validateAiProposal(proposal);if(validation){result={status:"missing_or_invalid_details",message:validation};showActivity("failed","More details needed",validation);setLiveState(validation,"error");}else{showProposal(proposal);accepted=true;result={status:"waiting_for_user_confirmation",summary:proposal.summary,approval_instruction:"Repeat the exact proposed action briefly and ask the user to say yes to confirm or cancel. Wait for the spoken answer."};setLiveState("Say yes to confirm or cancel","ready");}}
         else if(pendingAiAction||accepted)result={status:"another_action_is_already_waiting_for_review"};
         return {id:call.id,name:call.name,response:result};
-      });
+      }));
       liveSend({toolResponse:{functionResponses}});
     }
     const inputText=message?.serverContent?.inputTranscription?.text,outputText=message?.serverContent?.outputTranscription?.text;
