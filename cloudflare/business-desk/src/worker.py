@@ -320,27 +320,37 @@ async def update_product(request: Request):
     try:
         data = await request.json()
         product_id = int(data.get("id", 0))
-        name = str(data.get("name", "")).strip()[:160]
-        sku = str(data.get("sku", "")).strip().upper()[:40]
-        price = _minor(data.get("price"))
-        rate = Decimal(str(data.get("commission_rate", 5)))
-        if product_id < 1 or not name or not sku:
+        changed_fields = ("name", "sku", "price", "commission_rate", "installment_allowed", "active")
+        if product_id < 1 or not any(key in data for key in changed_fields):
+            raise ValueError("Choose a product and at least one field to change")
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc) or "Check the product details"}, status_code=400)
+    db = _env(request).DB
+    product = await _first(db.prepare(
+        "SELECT id,name,sku,price_minor,commission_rate,installment_allowed,active FROM products WHERE id=?"
+    ).bind(product_id))
+    if not product:
+        return JSONResponse({"error": "Product not found"}, status_code=404)
+    try:
+        name = str(data["name"] if "name" in data else product["name"]).strip()[:160]
+        sku = str(data["sku"] if "sku" in data else product["sku"]).strip().upper()[:40]
+        price = _minor(data["price"]) if "price" in data else int(product["price_minor"])
+        rate = Decimal(str(data["commission_rate"] if "commission_rate" in data else product["commission_rate"]))
+        installment_allowed = int(_boolean(data["installment_allowed"])) if "installment_allowed" in data else int(product["installment_allowed"])
+        active = int(_boolean(data["active"])) if "active" in data else int(product["active"])
+        if not name or not sku:
             raise ValueError("Enter a product name and SKU")
         if not rate.is_finite() or rate < 0 or rate > 100:
             raise ValueError("Commission rate must be between 0 and 100")
     except (ValueError, TypeError, InvalidOperation) as exc:
         return JSONResponse({"error": str(exc) or "Check the product details"}, status_code=400)
-    db = _env(request).DB
-    product = await _first(db.prepare("SELECT id FROM products WHERE id=?").bind(product_id))
-    if not product:
-        return JSONResponse({"error": "Product not found"}, status_code=404)
     try:
         await db.prepare("UPDATE products SET name=?,sku=?,price_minor=?,commission_rate=?,installment_allowed=?,active=? WHERE id=?").bind(
-            name, sku, price, float(rate), int(_boolean(data.get("installment_allowed"))), int(price > 0 and _boolean(data.get("active"))), product_id).run()
+            name, sku, price, float(rate), installment_allowed, active, product_id).run()
         await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'updated','product',?)").bind(user["id"], product_id).run()
     except Exception:
         return JSONResponse({"error": "Product was not updated. Check that its SKU is unique and try again."}, status_code=409)
-    return {"ok": True}
+    return {"ok": True, "product_id": product_id}
 
 
 @app.get("/api/batches")
@@ -1514,6 +1524,8 @@ async def update_business_settings(request: Request):
     try:
         data = await request.json()
         values = {key: str(value).strip()[:500] for key, value in data.items() if key in BUSINESS_SETTING_DEFAULTS and key != "followup_reminder_lead_days"}
+        if not values:
+            raise ValueError("No recognized business setting was provided; nothing was changed")
         for key, value in values.items():
             if key == "business_name" and (not value or len(value) > 120):
                 raise ValueError("Business name must be 1–120 characters")
@@ -3980,7 +3992,7 @@ async def ai_live_token(request: Request):
             "inputAudioTranscription": {},
             "outputAudioTranscription": {},
             "systemInstruction": {"parts": [{"text":
-                "You are OFFTune Dex, the live voice assistant for OFFTune Business Desk. Speak naturally and reply in Bengali, Hindi, or English, matching the user. Use workspace records only when the app sends them. If asked to change business data, call propose_workspace_action with a concise summary and JSON payload; never claim a change is complete. The app displays the proposed action and accepts explicit spoken approval or cancellation. After proposing an action, briefly repeat its key details and ask the user to say 'হ্যাঁ, করো' or 'Yes, confirm' to approve, or 'বাতিল' or 'Cancel' to stop. Never tell the user to click a button or open the interface to confirm. The app, not you, decides whether speech was an explicit confirmation and runs the action only then. Wait for the app to report completed or failed before claiming anything changed. Never infer missing amounts, identities, dates, recipients, or destructive intent. Ask one short clarifying question when required information is missing."
+                "You are OFFTune Dex, the live voice assistant for OFFTune Business Desk. Speak naturally and reply in Bengali, Hindi, or English, matching the user. Use workspace records only when the app sends them. If asked to change business data, call propose_workspace_action with a concise summary and JSON payload; never claim a change is complete. The app displays the proposed action and accepts explicit spoken approval or cancellation. After proposing an action, briefly repeat its key details and ask the user to say 'হ্যাঁ, করো' or 'Yes, confirm' to approve, or 'বাতিল' or 'Cancel' to stop. Never tell the user to click a button or open the interface to confirm. The app, not you, decides whether speech was an explicit confirmation and runs the action only then. Wait for the app to report completed or failed before claiming anything changed. For payload_json use a flat JSON object with exact API fields. Product edits use update_product with id and only fields to change (name, sku, price, commission_rate, installment_allowed, active); archive_product uses id and active false. Business settings use update_business_settings with keys such as business_name, business_email, business_phone, business_website, currency, or invoice_prefix. Targets use assign_target with user_id, period_type, period, and conversion_target. Expense creation uses spent_on, category, description, and amount. If a required ID, value, amount, date, or recipient is missing, ask one short clarifying question. Never infer missing amounts, identities, dates, recipients, or destructive intent."
             }]},
             "tools": [{"functionDeclarations": function_declarations}],
         }
@@ -4260,6 +4272,8 @@ async def ai_action(request: Request):
         payload = data.get("payload") or {}
         if operation not in AI_ACTION_ROUTES or not isinstance(payload, dict):
             raise ValueError("This AI action is not supported")
+        if operation == "update_business_settings" and not any(key in BUSINESS_SETTING_DEFAULTS and key != "followup_reminder_lead_days" for key in payload):
+            raise ValueError("No recognized business setting was provided; nothing was changed")
         target_path, method = AI_ACTION_ROUTES[operation]
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         if len(body) > 20000:
