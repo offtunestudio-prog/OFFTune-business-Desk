@@ -1706,7 +1706,8 @@ async function openAIAssistant(){
     if(!button){setLiveState("Approval control unavailable · open AI Desk","error");return true;}
     if(button.disabled)return true;
     button.click();
-    liveSend({realtimeInput:{text:negative?"The app accepted the user's spoken cancellation. Nothing was changed. Acknowledge briefly. Do not ask them to click.":"The app accepted the user's spoken approval and is running the action now. Do not ask them to click or confirm again. Wait for the app's result."}});
+    if(negative)liveSend({realtimeInput:{text:"The user cancelled the proposal. Nothing was changed. Acknowledge briefly."}});
+    else setLiveState("Voice approval received · saving the change…","thinking");
     return true;
   };
   const stopLive=update=>{liveRunId++;if(liveSetupTimer){clearTimeout(liveSetupTimer);liveSetupTimer=null;}livePhase="ready";if(liveProcessor){liveProcessor.disconnect();liveProcessor.onaudioprocess=null;liveProcessor=null;}liveSource?.disconnect();liveSource=null;liveStream?.getTracks().forEach(track=>track.stop());liveStream=null;if(liveSocket){const socket=liveSocket;liveSocket=null;try{socket.close(1000,"User ended voice session");}catch(_){}}livePlaybackSources.forEach(source=>{try{source.stop();}catch(_){}});livePlaybackSources=[];if(liveContext){const context=liveContext;liveContext=null;context.close().catch(()=>{});}if(liveToggle){liveToggle.textContent="Live voice";liveToggle.classList.remove("is-live");liveToggle.setAttribute("aria-pressed","false");liveToggle.disabled=false;}if(liveOrb){liveOrb.disabled=false;liveOrb.setAttribute("aria-label","Start live voice");}if(liveModelPicker)liveModelPicker.disabled=false;if(liveCheck)liveCheck.disabled=false;if(update)setLiveState("Live voice stopped · tap the orb to restart","ready");};
@@ -1892,12 +1893,12 @@ async function openAIAssistant(){
     const endpoint=agentEndpoints[proposal.operation];if(!endpoint)return;
     const button=event.target.closest("[data-ai-action-confirm]");button.disabled=true;voiceStatus.textContent="Completing the confirmed action…";setLiveState("Completing the confirmed action…","thinking");
     try{
-      const result=await post("/api/ai/action",{operation:proposal.operation,payload:proposal.payload});pendingAiAction=null;clearLiveProposal();event.target.closest(".ai-action-proposal")?.remove();
+      const result=await post("/api/ai/action",{operation:proposal.operation,payload:proposal.payload});if(result?.error||result?.ok===false)throw new Error(result.error||"The workspace did not save the change");pendingAiAction=null;clearLiveProposal();event.target.closest(".ai-action-proposal")?.remove();
       const completion=proposal.operation==="record_sale"?"Sale saved. Its invoice draft is ready in Invoices.":proposal.operation==="send_invoice"?"Invoice email submitted to the delivery queue.":proposal.operation==="create_invoice"?"Invoice draft created.":(actionLabels[proposal.operation]||"Action")+" completed.";
       liveSend({realtimeInput:{text:"The user confirmed the proposed action and it completed successfully. Briefly acknowledge this in the user’s language."}});
       const item=document.createElement("article");item.className="ai-message assistant";const heading=document.createElement("b");heading.textContent="Completed";const text=document.createElement("p");text.textContent=completion+(result?.invoice_no?" "+result.invoice_no:"");item.append(heading,text);log.append(item);
       await loadCommon();await navigate(state.page);voiceStatus.textContent=completion;setLiveState(completion,"ready");
-    }catch(error){button.disabled=false;voiceStatus.textContent=error.message;setLiveState("Action not completed · "+String(error.message||"Try again").slice(0,140),"error");const item=document.createElement("article");item.className="ai-message assistant ai-error";const heading=document.createElement("b");heading.textContent="Action not completed";const text=document.createElement("p");text.textContent=error.message;item.append(heading,text);log.append(item);}
+    }catch(error){button.disabled=false;const reason=String(error?.message||"The workspace rejected this change").slice(0,180);voiceStatus.textContent=reason;setLiveState("Action not completed · "+reason.slice(0,140),"error");const item=document.createElement("article");item.className="ai-message assistant ai-error";const heading=document.createElement("b");heading.textContent="Action not completed";const text=document.createElement("p");text.textContent=reason;item.append(heading,text);log.append(item);liveSend({realtimeInput:{text:"The confirmed workspace action failed. Nothing was saved. Explain this validation error briefly in the user's language and ask for the missing or corrected information: "+reason}});}
     log.scrollTop=log.scrollHeight;
   });
   const agentWorkspaceContext=async()=>{
