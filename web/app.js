@@ -1933,23 +1933,25 @@ async function openAIAssistant(){
       const completion=proposal.operation==="record_sale"?"Sale saved. Its invoice draft is ready in Invoices.":proposal.operation==="send_invoice"?"Invoice email submitted to the delivery queue.":proposal.operation==="create_invoice"?"Invoice draft created.":(actionLabels[proposal.operation]||"Action")+" completed.";
       liveSend({realtimeInput:{text:"The user confirmed the proposed action and it completed successfully. Briefly acknowledge this in the user’s language."}});
       const item=document.createElement("article");item.className="ai-message assistant";const heading=document.createElement("b");heading.textContent="Completed";const text=document.createElement("p");text.textContent=completion+(result?.invoice_no?" "+result.invoice_no:"");item.append(heading,text);log.append(item);
-      showActivity("done",proposal.operation==="record_sale"?"Sale verified":"Change saved",completion+(result?.order_no?" "+result.order_no:""));await loadCommon();getWorkspaceContext(true).catch(()=>{});await navigate(state.page);voiceStatus.textContent=completion;setLiveState(completion,"ready");
-    }catch(error){button.disabled=false;const reason=String(error?.message||"The workspace rejected this change").slice(0,180);showActivity("failed","Action not completed",reason);voiceStatus.textContent=reason;setLiveState("Action not completed · "+reason.slice(0,140),"error");const item=document.createElement("article");item.className="ai-message assistant ai-error";const heading=document.createElement("b");heading.textContent="Action not completed";const text=document.createElement("p");text.textContent=reason;item.append(heading,text);log.append(item);liveSend({realtimeInput:{text:"The confirmed workspace action failed. Nothing was saved. Explain this validation error briefly in the user's language and ask for the missing or corrected information: "+reason}});}
+      showActivity("done",proposal.operation==="record_sale"?"Sale verified":"Change saved",completion+(result?.order_no?" "+result.order_no:""));voiceStatus.textContent=completion;setLiveState(completion,"ready");try{await loadCommon();workspaceContextPromise=null;await navigate(state.page);getWorkspaceContext(true).catch(()=>{});}catch(_){showActivity("done","Change saved","The change saved, but the screen could not refresh. Reload to see it.");voiceStatus.textContent="The change saved, but the screen could not refresh. Reload to see it.";setLiveState(voiceStatus.textContent,"ready");}
+    }catch(error){button.disabled=false;const reason=String(error?.message||"The workspace rejected this change").slice(0,180);showActivity("failed","Could not verify the change",reason);voiceStatus.textContent=reason;setLiveState("Could not verify · "+reason.slice(0,140),"error");const item=document.createElement("article");item.className="ai-message assistant ai-error";const heading=document.createElement("b");heading.textContent="Could not verify the change";const text=document.createElement("p");text.textContent=reason;item.append(heading,text);log.append(item);liveSend({realtimeInput:{text:"The confirmed workspace action did not return a verified success. Do not claim it was saved or unsaved; explain this error briefly and ask the user to check the workspace before retrying: "+reason}});}
     log.scrollTop=log.scrollHeight;
   });
-  const agentWorkspaceContext=async()=>{
+  const agentWorkspaceContext=async(fresh=false)=>{
+    const commonRefresh=fresh?loadCommon():Promise.resolve();
     const role=state.user?.role||"";
     const permissions=new Set(state.user?.permissions||[]);
     const maySeeAnalytics=role==="owner"||permissions.has("analytics")||permissions.has("collections");
     const maySeeExpenses=role==="owner"||canViewData("company-revenue");
     const [invoices,installments,targets,courses,analyticsBatches,expenses,incentives]=await Promise.all([
-      state.invoices?Promise.resolve(state.invoices):api("/api/invoices").catch(()=>[]),
-      state.installments?Promise.resolve(state.installments):api("/api/installments").catch(()=>[]),
+      (fresh||!state.invoices)?api("/api/invoices").catch(()=>[]):Promise.resolve(state.invoices),
+      (fresh||!state.installments)?api("/api/installments").catch(()=>[]):Promise.resolve(state.installments),
       role==="employee"?api("/api/targets/self?month="+encodeURIComponent(today().slice(0,7))).catch(()=>null):api("/api/targets?month="+encodeURIComponent(today().slice(0,7))).catch(()=>null),
       maySeeAnalytics?api("/api/analytics/courses").catch(()=>[]):Promise.resolve([]),
       maySeeAnalytics?api("/api/analytics/batches").catch(()=>[]):Promise.resolve([]),
       maySeeExpenses?api("/api/expenses").catch(()=>[]):Promise.resolve([]),
-      api("/api/commissions").catch(()=>[])
+      api("/api/commissions").catch(()=>[]),
+      commonRefresh
     ]);
     const manageableOrders=(state.orders||[]).filter(order=>role==="owner"||order.can_manage);
     const visibleOrderIds=new Set(manageableOrders.map(order=>Number(order.id)));
@@ -1979,7 +1981,7 @@ async function openAIAssistant(){
       business_settings:role==="owner"?{business_name:settings.business_name,currency:settings.currency,invoice_prefix:settings.invoice_prefix}:null};
   };
   let workspaceContextPromise=null;
-  const getWorkspaceContext=(refresh=false)=>{if(refresh||!workspaceContextPromise)workspaceContextPromise=agentWorkspaceContext().catch(error=>{workspaceContextPromise=null;throw error;});return workspaceContextPromise;};
+  const getWorkspaceContext=(refresh=false)=>{if(refresh||!workspaceContextPromise)workspaceContextPromise=agentWorkspaceContext(refresh).catch(error=>{workspaceContextPromise=null;throw error;});return workspaceContextPromise;};
   if(shareWorkspaceData)getWorkspaceContext().catch(()=>{});
   form.onsubmit=async event=>{
     event.preventDefault();const input=form.message,button=form.querySelector("button[type=submit]"),text=input.value.trim();
