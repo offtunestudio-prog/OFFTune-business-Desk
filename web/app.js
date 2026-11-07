@@ -1750,11 +1750,11 @@ async function openAIAssistant(){
   const pcm16Base64=samples=>{const pcm=new Int16Array(samples.length);for(let i=0;i<samples.length;i++){const v=Math.max(-1,Math.min(1,samples[i]));pcm[i]=v<0?v*32768:v*32767;}const bytes=new Uint8Array(pcm.buffer);let binary="";for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,Math.min(i+0x8000,bytes.length)));return btoa(binary);};
   const prepareVoiceActionFallback=async spoken=>{
     if(voiceActionPlanning||pendingAiAction||!spoken.trim())return;
-    voiceActionPlanning=true;
+    voiceActionPlanning=true;const planningRun=liveRunId;
     showActivity("saving","Preparing action","Checking the details before anything is saved.");
     try{
       const response=await post("/api/ai/chat",{messages:[{role:"user",content:spoken.slice(0,3000)}],workspace_context:shareWorkspaceData?await getWorkspaceContext(true):{},external_ai_consent:true,segment:aiSegment,provider:providerPicker?.value||status.provider,model:modelPicker?.value.trim()||status.model});
-      if(pendingAiAction)return;
+      if(planningRun!==liveRunId||pendingAiAction)return;
       if(response?.proposal){
         if(showProposal(response.proposal)){
           voiceActionContext="";voiceActionContextAt=0;
@@ -1771,11 +1771,12 @@ async function openAIAssistant(){
         liveSend({clientContent:{turns:[{role:"user",parts:[{text:"No workspace action was submitted. Tell the user briefly: "+reason+" Do not claim a sale was recorded."}]}],turnComplete:true}});
       }
     }catch(error){
+      if(planningRun!==liveRunId)return;
       const reason=String(error?.message||"Could not prepare this action").slice(0,180);
       showActivity("failed","No change submitted",reason);
       setLiveState("No change submitted · "+reason,"error");
       liveSend({clientContent:{turns:[{role:"user",parts:[{text:"The app could not prepare that action: "+reason+". Tell the user nothing has been confirmed as saved."}]}],turnComplete:true}});
-    }finally{voiceActionPlanning=false;}
+    }finally{if(planningRun===liveRunId)voiceActionPlanning=false;}
   };
   const receiveLiveMessage=async message=>{
     const parts=message?.serverContent?.modelTurn?.parts||[];
