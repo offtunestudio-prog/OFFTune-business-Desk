@@ -1676,6 +1676,15 @@ async function openAIAssistant(){
   const activity=document.createElement("aside");activity.className="ai-activity hidden";activity.setAttribute("aria-live","polite");activity.setAttribute("aria-label","AI action progress");root.append(activity);
   const showActivity=(phase,title,detail="")=>{activity.classList.remove("hidden");activity.dataset.phase=phase;activity.replaceChildren();const mark=document.createElement("span");mark.className="ai-activity-mark";mark.textContent=phase==="done"?"✓":phase==="failed"?"!":phase==="saving"?"↻":"•";const body=document.createElement("div");const heading=document.createElement("strong");heading.textContent=title;const line=document.createElement("p");line.textContent=detail;body.append(heading,line);activity.append(mark,body);};
   const validateAiProposal=proposal=>{
+    if(proposal.operation==="add_product"){
+      const payload=proposal.payload||{};
+      if(payload.product_type==null&&payload.type!=null)payload.product_type=payload.type;
+      if(payload.installment_allowed==null&&payload.emi_allowed!=null)payload.installment_allowed=payload.emi_allowed;
+      if(!String(payload.name||"").trim()||!String(payload.sku||"").trim())return "I need a product name and SKU before adding it.";
+      if(!["course","sample_pack","digital_product"].includes(String(payload.product_type||"")))return "Is this a course, sample pack, or digital product?";
+      if(!Number.isFinite(Number(payload.price))||Number(payload.price)<=0)return "I need a price greater than zero before adding the product.";
+      return "";
+    }
     if(proposal.operation!=="record_sale")return "";
     if(!(state.products||[]).some(p=>p.active!==false))return "There are no products in the catalog yet. Add a priced product before recording a sale.";
     const payload=proposal.payload||{};
