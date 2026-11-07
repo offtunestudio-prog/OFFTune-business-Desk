@@ -1812,7 +1812,7 @@ async function openAIAssistant(){
     if(message?.serverContent?.interrupted){livePlaybackSources.forEach(source=>{try{source.stop();}catch(_){}});livePlaybackSources=[];livePlaybackAt=liveContext?.currentTime||0;setLiveState("Listening","listening");}
     if(message?.serverContent?.turnComplete){
       const request=liveUtterance;liveUtterance="";liveReply="";
-      const actionWords=/(?:\b(?:record|save|add|create|update|change|delete|assign|approve|send|schedule|reschedule|sell)\b|রেকর্ড|সেল|বিক্রি|যোগ কর|তৈরি কর|বদল|পরিবর্তন কর|অনুমোদন কর|পাঠা)/iu;
+      const actionWords=/(?:\b(?:record|save|add|create|update|change|delete|assign|approve|send|schedule|reschedule|sell)\b|(?:সেল|বিক্রি|sale).{0,30}(?:কর|রেকর্ড|লিখ|save)|রেকর্ড\s*(?:কর|দাও)|যোগ কর|তৈরি কর|বদল|পরিবর্তন কর|অনুমোদন কর|পাঠা)/iu;
       const continuing=voiceActionContext&&Date.now()-voiceActionContextAt<90000;
       if(/^(?:cancel|stop|never mind|বাতিল|থামো|বাদ দাও|না)$/iu.test(request.trim())){voiceActionContext="";voiceActionContextAt=0;}
       else if(!pendingAiAction&&!voiceActionPlanning&&request&&(actionWords.test(request)||continuing)){
