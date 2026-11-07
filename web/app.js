@@ -1667,7 +1667,7 @@ async function openAIAssistant(){
     if(/^\s*\d+[.)]\s+/.test(line))return `<div class="ai-answer-list-item"><span>${esc((line.match(/^\s*\d+[.)]/)||[""])[0].trim())}</span><p>${inline.replace(/^\s*\d+[.)]\s+/,"")}</p></div>`;
     return line.trim()?`<p>${inline}</p>`:`<div class="ai-answer-spacer"></div>`;
   }).join("");
-  let pendingAiAction=null,approvalTranscriptBuffer="",approvalTranscriptAt=0;
+  let pendingAiAction=null,approvalTranscriptBuffer="",approvalTranscriptAt=0,liveUtterance="",liveReply="",voiceActionPlanning=false,voiceActionContext="",voiceActionContextAt=0;
   let liveSocket=null,liveStream=null,liveContext=null,liveSource=null,liveProcessor=null,livePlaybackAt=0,livePlaybackSources=[],liveSetupTimer=null,livePhase="ready",liveProcessingFailures=0,liveRunId=0;
   const close=()=>{stopLive(false);setLiveMiniMode(false);root.remove();document.removeEventListener("keydown",onKey);};
   const onKey=event=>{if(event.key==="Escape"&&livePanel?.classList.contains("hidden"))close();};
@@ -1734,7 +1734,8 @@ async function openAIAssistant(){
     const simpleYes=/^(?:হ্যাঁ|হ্যা|জি|yes|yeah|yep|yup|ok|okay|sure|confirm|confirmed|approve|approved|go ahead|proceed|do it|ঠিক আছে|করো|করে দাও|করুন|पुष्टि|हाँ|हां|जी|ठीक है|करो|haan|han|theek hai)(?:\s|$)/u.test(words);
     const explicitApproval=/(?:^|\s)(?:আমি\s+)?(?:নিশ্চিত|কনফার্ম|confirm|অনুমোদন|approve)\s+(?:করছি|করলাম|করো|করুন|করে দাও|করি|দিচ্ছি|দিলাম|it)(?=\s|$)|(?:^|\s)আমি\s+(?:সম্মতি|অনুমতি)\s+(?:দিচ্ছি|দিলাম)(?=\s|$)|(?:^|\s)(?:yes|জি|হ্যাঁ|হ্যা)\s+(?:(?:এটা|ওটা|এই কাজটা|তুমি|আপনি)\s+)*(?:করো|করে দাও|করুন|পাঠাও|পাঠিয়ে দাও|পাঠিয়ে দাও)(?=\s|$)/u.test(words);
     if(!negative&&hesitant){approvalTranscriptBuffer="";approvalTranscriptAt=0;return false;}
-    if(!negative&&!(explicitApproval||simpleYes))return false;
+    const shortApproval=words.length<90&&/^(?:(?:আচ্ছা|ঠিক আছে|okay|ok|well|হুম|উম)\s+)*(?:হ্যাঁ|হ্যা|জি|yes|yeah|yep|sure|confirm|করো|করে দাও|go ahead)(?:\s+(?:করো|করে দাও|please|এটা|ওটা|এখন|confirm|কনফার্ম))*$/u.test(words);
+    if(!negative&&!(explicitApproval||simpleYes||shortApproval))return false;
     approvalTranscriptBuffer="";approvalTranscriptAt=0;
     const buttons=[...log.querySelectorAll(negative?"[data-ai-action-cancel]":"[data-ai-action-confirm]")];
     const button=buttons.at(-1);
@@ -1747,6 +1748,35 @@ async function openAIAssistant(){
   };
   const stopLive=update=>{liveRunId++;if(liveSetupTimer){clearTimeout(liveSetupTimer);liveSetupTimer=null;}livePhase="ready";if(liveProcessor){liveProcessor.disconnect();liveProcessor.onaudioprocess=null;liveProcessor=null;}liveSource?.disconnect();liveSource=null;liveStream?.getTracks().forEach(track=>track.stop());liveStream=null;if(liveSocket){const socket=liveSocket;liveSocket=null;try{socket.close(1000,"User ended voice session");}catch(_){}}livePlaybackSources.forEach(source=>{try{source.stop();}catch(_){}});livePlaybackSources=[];if(liveContext){const context=liveContext;liveContext=null;context.close().catch(()=>{});}if(liveToggle){liveToggle.textContent="Live voice";liveToggle.classList.remove("is-live");liveToggle.setAttribute("aria-pressed","false");liveToggle.disabled=false;}if(liveOrb){liveOrb.disabled=false;liveOrb.setAttribute("aria-label","Start live voice");}if(liveModelPicker)liveModelPicker.disabled=false;if(liveCheck)liveCheck.disabled=false;if(update)setLiveState("Live voice stopped · tap the orb to restart","ready");};
   const pcm16Base64=samples=>{const pcm=new Int16Array(samples.length);for(let i=0;i<samples.length;i++){const v=Math.max(-1,Math.min(1,samples[i]));pcm[i]=v<0?v*32768:v*32767;}const bytes=new Uint8Array(pcm.buffer);let binary="";for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,Math.min(i+0x8000,bytes.length)));return btoa(binary);};
+  const prepareVoiceActionFallback=async spoken=>{
+    if(voiceActionPlanning||pendingAiAction||!spoken.trim())return;
+    voiceActionPlanning=true;
+    showActivity("saving","Preparing action","Checking the details before anything is saved.");
+    try{
+      const response=await post("/api/ai/chat",{messages:[{role:"user",content:spoken.slice(0,3000)}],workspace_context:shareWorkspaceData?await getWorkspaceContext(true):{},external_ai_consent:true,segment:aiSegment,provider:providerPicker?.value||status.provider,model:modelPicker?.value.trim()||status.model});
+      if(pendingAiAction)return;
+      if(response?.proposal){
+        if(showProposal(response.proposal)){
+          voiceActionContext="";voiceActionContextAt=0;
+          liveSend({clientContent:{turns:[{role:"user",parts:[{text:"The app has prepared an action for review. It has NOT saved anything. Summarize the proposed change and ask the user to say yes or no. Do not claim it is being recorded or completed."}]}],turnComplete:true}});
+        }else{
+          voiceActionContext=spoken;voiceActionContextAt=Date.now();
+          const missing=validateAiProposal(response.proposal)||"The action needs more details.";
+          liveSend({clientContent:{turns:[{role:"user",parts:[{text:"The app needs more details before it can prepare this action: "+missing+" Ask one short question. Nothing was saved."}]}],turnComplete:true}});
+        }
+      }else{
+        const reason=String(response?.answer||"The app needs more details before this action can be prepared.").slice(0,500);
+        voiceActionContext=spoken;voiceActionContextAt=Date.now();showActivity("failed","No change submitted",reason);
+        setLiveState("No change submitted · more details needed","error");
+        liveSend({clientContent:{turns:[{role:"user",parts:[{text:"No workspace action was submitted. Tell the user briefly: "+reason+" Do not claim a sale was recorded."}]}],turnComplete:true}});
+      }
+    }catch(error){
+      const reason=String(error?.message||"Could not prepare this action").slice(0,180);
+      showActivity("failed","No change submitted",reason);
+      setLiveState("No change submitted · "+reason,"error");
+      liveSend({clientContent:{turns:[{role:"user",parts:[{text:"The app could not prepare that action: "+reason+". Tell the user nothing has been confirmed as saved."}]}],turnComplete:true}});
+    }finally{voiceActionPlanning=false;}
+  };
   const receiveLiveMessage=async message=>{
     const parts=message?.serverContent?.modelTurn?.parts||[];
     for(const part of parts){
@@ -1777,13 +1807,23 @@ async function openAIAssistant(){
       liveSend({toolResponse:{functionResponses}});
     }
     const inputText=message?.serverContent?.inputTranscription?.text,outputText=message?.serverContent?.outputTranscription?.text;
-    if(inputText){log.insertAdjacentHTML("beforeend",`<article class="ai-message user"><b>You · live voice</b><p>${esc(inputText)}</p></article>`);log.scrollTop=log.scrollHeight;if(!handleLiveVoiceConfirmation(inputText))setLiveState(pendingAiAction?"Waiting for your spoken yes or no":"Thinking",pendingAiAction?"ready":"thinking");}
-    if(outputText){log.insertAdjacentHTML("beforeend",`<article class="ai-message assistant"><b>OFFTune · live voice</b><p>${esc(outputText)}</p></article>`);log.scrollTop=log.scrollHeight;}
+    if(inputText){log.insertAdjacentHTML("beforeend",`<article class="ai-message user"><b>You · live voice</b><p>${esc(inputText)}</p></article>`);log.scrollTop=log.scrollHeight;const approvalHandled=handleLiveVoiceConfirmation(inputText);if(approvalHandled){liveUtterance="";liveReply="";}else if(!pendingAiAction)liveUtterance=(liveUtterance+" "+inputText).trim().slice(-1800);if(!approvalHandled)setLiveState(pendingAiAction?"Waiting for your spoken yes or no":"Thinking",pendingAiAction?"ready":"thinking");}
+    if(outputText){log.insertAdjacentHTML("beforeend",`<article class="ai-message assistant"><b>OFFTune · live voice</b><p>${esc(outputText)}</p></article>`);log.scrollTop=log.scrollHeight;liveReply=(liveReply+" "+outputText).trim().slice(-1800);}
     if(message?.serverContent?.interrupted){livePlaybackSources.forEach(source=>{try{source.stop();}catch(_){}});livePlaybackSources=[];livePlaybackAt=liveContext?.currentTime||0;setLiveState("Listening","listening");}
-    if(message?.serverContent?.turnComplete&&liveState?.textContent==="Thinking")setLiveState("Listening","listening");
+    if(message?.serverContent?.turnComplete){
+      const request=liveUtterance;liveUtterance="";liveReply="";
+      const actionWords=/(?:\b(?:record|save|add|create|update|change|delete|assign|approve|send|schedule|reschedule|sell)\b|রেকর্ড|সেল|বিক্রি|যোগ কর|তৈরি কর|বদল|পরিবর্তন কর|অনুমোদন কর|পাঠা)/iu;
+      const continuing=voiceActionContext&&Date.now()-voiceActionContextAt<90000;
+      if(/^(?:cancel|stop|never mind|বাতিল|থামো|বাদ দাও|না)$/iu.test(request.trim())){voiceActionContext="";voiceActionContextAt=0;}
+      else if(!pendingAiAction&&!voiceActionPlanning&&request&&(actionWords.test(request)||continuing)){
+        const command=actionWords.test(request)?request:(voiceActionContext+"\nAdditional details: "+request);
+        voiceActionContext="";voiceActionContextAt=0;prepareVoiceActionFallback(command);
+      }
+      else if(liveState?.textContent==="Thinking")setLiveState("Listening","listening");
+    }
   };
   const startLive=async()=>{
-    const runId=++liveRunId;
+    const runId=++liveRunId;liveUtterance="";liveReply="";voiceActionPlanning=false;voiceActionContext="";voiceActionContextAt=0;
     livePanel?.classList.remove("hidden");
     liveToggle.disabled=true;if(liveOrb)liveOrb.disabled=true;if(liveModelPicker)liveModelPicker.disabled=true;if(liveCheck)liveCheck.disabled=true;livePhase="token";setLiveState("Preparing your private voice session…","thinking");
     try{
@@ -1884,7 +1924,7 @@ async function openAIAssistant(){
   const actionLabels={open_section:"Open workspace section",manage_team_access:"Change team access",edit_team_member:"Edit team member",update_team_reporting:"Update team reporting line",add_team_designation:"Add team designation",delete_team_designation:"Remove team designation",update_incentive_settings:"Update incentive settings",update_team_incentive_rules:"Update team incentive rules",update_incentive_due_date:"Change incentive due date",report_target_conversion:"Record target conversion",record_sale:"Record sale",record_payment:"Record payment",create_invoice:"Create invoice draft",delete_invoice:"Delete invoice",assign_target:"Set team target",reschedule_target:"Reschedule team target",delete_target:"Delete team target",update_followup:"Update payment follow-up",update_reminder_flow:"Change reminder automation",edit_invoice_template:"Update invoice template",update_business_settings:"Change business settings",record_expense:"Record expense",delete_expense:"Delete expense",add_product:"Add product",update_product:"Update product",archive_product:"Archive product",add_batch:"Add batch",update_batch:"Update batch",remove_batch:"Remove batch",assign_order_batches:"Update batch assignment",update_customer:"Update customer",delete_customer:"Delete customer",send_team_message:"Send team message",complete_team_message:"Complete team message",pay_incentive:"Record incentive payout"};
   const showProposal=proposal=>{
     const validation=validateAiProposal(proposal);if(validation){const notice=document.createElement("article");notice.className="ai-message assistant ai-error";const heading=document.createElement("b");heading.textContent="More details needed";const detail=document.createElement("p");detail.textContent=validation;notice.append(heading,detail);log.append(notice);log.scrollTop=log.scrollHeight;showActivity("failed","More details needed",validation);setLiveState(validation,"error");return false;}
-    approvalTranscriptBuffer="";approvalTranscriptAt=0;pendingAiAction=proposal;
+    approvalTranscriptBuffer="";approvalTranscriptAt=0;liveUtterance="";liveReply="";voiceActionContext="";voiceActionContextAt=0;pendingAiAction=proposal;
     const card=document.createElement("article");card.className="ai-message assistant ai-action-proposal";
     const title=document.createElement("b");title.textContent="Review before I do this · "+(actionLabels[proposal.operation]||"Business action");card.append(title);
     const summary=document.createElement("p");summary.textContent=proposal.summary||"Review the proposed change.";card.append(summary);
@@ -1894,7 +1934,7 @@ async function openAIAssistant(){
     const actions=document.createElement("div");actions.className="ai-action-buttons";
     const confirm=document.createElement("button");confirm.type="button";confirm.className="button primary";confirm.dataset.aiActionConfirm="";confirm.textContent="Confirm and do it";
     const cancel=document.createElement("button");cancel.type="button";cancel.className="button secondary";cancel.dataset.aiActionCancel="";cancel.textContent="Cancel";
-    actions.append(confirm,cancel);card.append(actions);log.append(card);log.scrollTop=log.scrollHeight;showLiveProposal(proposal);showActivity("review",actionLabels[proposal.operation]||"Review action",proposal.summary||"Waiting for your approval");setLiveState("Say yes to confirm or cancel","ready");
+    actions.append(confirm,cancel);card.append(actions);log.append(card);log.scrollTop=log.scrollHeight;showLiveProposal(proposal);showActivity("review",actionLabels[proposal.operation]||"Review action",proposal.summary||"Waiting for your approval");setLiveState("Say yes to confirm or cancel","ready");return true;
   };
   const openInvoiceVoicePreview=async id=>{
     try{
