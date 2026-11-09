@@ -1801,7 +1801,7 @@ async function openAIAssistant(){
         let proposal=call.args||{};if(typeof proposal==="string"){try{proposal=JSON.parse(proposal);}catch(_){proposal={};}} if(typeof proposal.payload_json==="string"){try{proposal.payload=JSON.parse(proposal.payload_json);}catch(_){proposal={};}}
         let result={status:"unsupported_or_incomplete_proposal"};
         if(call.name==="confirm_workspace_action"){
-          const decision=String(proposal.decision||"").toLowerCase(),current=pendingAiAction,heard=String(proposal.heard_text||"").toLocaleLowerCase().normalize("NFKC").trim();
+          const decision=String(proposal.decision||"").toLowerCase(),current=pendingAiAction,heard=String(proposal.heard_text||"").toLocaleLowerCase().normalize("NFKC").replace(/[^\p{L}\p{M}\p{N}\s]/gu," ").replace(/\s+/g," ").trim();
           if(!current)result=lastActionOutcome&&Date.now()-lastActionAt<10000?lastActionOutcome:{status:"no_pending_action",message:"No reviewed action is waiting. Do not say that anything was changed."};
           else if(decision==="cancel"){
             const button=[...log.querySelectorAll("[data-ai-action-cancel]")].at(-1);
