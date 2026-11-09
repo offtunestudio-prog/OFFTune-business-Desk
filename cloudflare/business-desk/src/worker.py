@@ -3603,7 +3603,7 @@ AI_ACTION_GUIDE = (
     "pay_incentive needs user_id and amount; update_incentive_due_date needs event_id and due_date; "
     "send_team_message needs recipient_id, title, body; complete_team_message needs id; "
     "manage_team_access needs user_id and active; edit_team_member needs user_id, name, email; update_team_reporting needs user_id and manager_id; "
-    "update_business_settings accepts only recognized business setting keys. Do not include confirmed in payload; the app supplies it after the user approves. "
+    "update_business_settings accepts only recognized business setting keys; update_ai_routing needs segments[{id,mode,provider,model}] with mode custom or shared and an already-connected provider. Never include API keys or passwords in AI proposals. Do not include confirmed in payload; the app supplies it after the user approves. "
 )
 
 AI_ACTION_ROUTES = {
@@ -3621,6 +3621,7 @@ AI_ACTION_ROUTES = {
     "update_reminder_flow": ("/api/settings/reminders", "POST"),
     "edit_invoice_template": ("/api/invoice/template", "POST"),
     "update_business_settings": ("/api/settings", "POST"),
+    "update_ai_routing": ("/api/settings/ai-routing", "POST"),
     "record_expense": ("/api/expenses", "POST"),
     "delete_expense": ("/api/expenses/delete", "POST"),
     "add_product": ("/api/products", "POST"),
@@ -4359,6 +4360,24 @@ async def ai_action(request: Request):
             raise ValueError("This AI action is not supported")
         if operation == "update_business_settings" and not any(key in BUSINESS_SETTING_DEFAULTS and key != "followup_reminder_lead_days" for key in payload):
             raise ValueError("No recognized business setting was provided; nothing was changed")
+        if operation == "update_ai_routing":
+            routes = payload.get("segments")
+            if not isinstance(routes, list) or not routes or len(routes) > len(AI_SEGMENTS):
+                raise ValueError("Choose one or more workspace areas to route")
+            for route in routes:
+                if not isinstance(route, dict) or set(route) - {"id", "mode", "provider", "model"}:
+                    raise ValueError("AI routing can change only the area, provider and model; keep API keys in Settings")
+                if str(route.get("id") or "") not in AI_SEGMENTS:
+                    raise ValueError("Choose a valid workspace area")
+                if route.get("mode") == "custom":
+                    provider = str(route.get("provider") or "").lower()
+                    if provider not in AI_PROVIDER_URLS or not str(route.get("model") or "").strip():
+                        raise ValueError("Choose a connected provider and model for the area")
+                    saved = await _setting(_env(request).DB, "ai_api_key_enc__" + provider, "")
+                    if not saved and not (provider == "openrouter" and bool(getattr(_env(request), "OPENROUTER_API_KEY", ""))):
+                        raise ValueError("Connect this AI provider in Settings before using it for an area")
+                elif route.get("mode") != "shared":
+                    raise ValueError("Choose custom or shared routing for the area")
         target_path, method = AI_ACTION_ROUTES[operation]
         if operation == "archive_product":
             payload = {**payload, "active": False}
