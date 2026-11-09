@@ -1801,13 +1801,15 @@ async function openAIAssistant(){
         let proposal=call.args||{};if(typeof proposal==="string"){try{proposal=JSON.parse(proposal);}catch(_){proposal={};}} if(typeof proposal.payload_json==="string"){try{proposal.payload=JSON.parse(proposal.payload_json);}catch(_){proposal={};}}
         let result={status:"unsupported_or_incomplete_proposal"};
         if(call.name==="confirm_workspace_action"){
-          const decision=String(proposal.decision||"").toLowerCase(),current=pendingAiAction;
+          const decision=String(proposal.decision||"").toLowerCase(),current=pendingAiAction,heard=String(proposal.heard_text||"").toLocaleLowerCase().normalize("NFKC").trim();
           if(!current)result=lastActionOutcome&&Date.now()-lastActionAt<10000?lastActionOutcome:{status:"no_pending_action",message:"No reviewed action is waiting. Do not say that anything was changed."};
           else if(decision==="cancel"){
             const button=[...log.querySelectorAll("[data-ai-action-cancel]")].at(-1);
             if(button)button.click();
             result={status:"cancelled",message:"The proposed action was cancelled. Nothing was changed."};
           }else if(decision==="approve"){
+            const explicitYes=heard.length<120&&/^(?:হ্যাঁ|হ্যা|জি|yes|yeah|yep|ok|okay|ঠিক আছে|কনফার্ম|confirm|approve|করো|করে দাও|go ahead)(?:\b|\s|$)/u.test(heard)&&!/(?:\b(?:no|cancel|stop|not)\b|না|বাতিল|থামো)/u.test(heard);
+            if(!explicitYes){result={status:"approval_not_verified",message:"I need a clear spoken yes before saving. Ask the user to confirm again."};return {id:call.id,name:call.name,response:result};}
             const button=[...log.querySelectorAll("[data-ai-action-confirm]")].at(-1);
             if(!button||button.disabled&&activity.dataset.phase!=="saving")result={status:"unavailable",message:"The app could not start the action. Do not claim it was completed."};
             else{
