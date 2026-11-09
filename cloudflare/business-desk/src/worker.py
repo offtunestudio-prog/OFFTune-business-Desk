@@ -4364,18 +4364,27 @@ async def ai_action(request: Request):
             routes = payload.get("segments")
             if not isinstance(routes, list) or not routes or len(routes) > len(AI_SEGMENTS):
                 raise ValueError("Choose one or more workspace areas to route")
+            current_routes = await _ai_routing_map(_env(request).DB)
+            seen_segments = set()
             for route in routes:
                 if not isinstance(route, dict) or set(route) - {"id", "mode", "provider", "model"}:
                     raise ValueError("AI routing can change only the area, provider and model; keep API keys in Settings")
-                if str(route.get("id") or "") not in AI_SEGMENTS:
-                    raise ValueError("Choose a valid workspace area")
+                segment = str(route.get("id") or "")
+                if segment not in AI_SEGMENTS or segment in seen_segments:
+                    raise ValueError("Choose each valid workspace area only once")
+                seen_segments.add(segment)
                 if route.get("mode") == "custom":
                     provider = str(route.get("provider") or "").lower()
                     if provider not in AI_PROVIDER_URLS or not str(route.get("model") or "").strip():
                         raise ValueError("Choose a connected provider and model for the area")
-                    saved = await _setting(_env(request).DB, "ai_api_key_enc__" + provider, "")
-                    if not saved and not (provider == "openrouter" and bool(getattr(_env(request), "OPENROUTER_API_KEY", ""))):
+                    current = current_routes.get(segment) or {}
+                    same_own_key = current.get("provider") == provider and bool(current.get("use_own_key"))
+                    own_key_saved = bool(await _setting(_env(request).DB, "ai_api_key_enc__segment_" + segment, "")) if same_own_key else False
+                    shared_key_saved = bool(await _setting(_env(request).DB, "ai_api_key_enc__" + provider, ""))
+                    if not own_key_saved and not shared_key_saved and not (provider == "openrouter" and bool(getattr(_env(request), "OPENROUTER_API_KEY", ""))):
                         raise ValueError("Connect this AI provider in Settings before using it for an area")
+                    if own_key_saved:
+                        route["use_own_key"] = True
                 elif route.get("mode") != "shared":
                     raise ValueError("Choose custom or shared routing for the area")
         target_path, method = AI_ACTION_ROUTES[operation]
