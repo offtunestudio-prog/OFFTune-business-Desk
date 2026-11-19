@@ -3603,7 +3603,12 @@ AI_ACTION_GUIDE = (
     "pay_incentive needs user_id and amount; update_incentive_due_date needs event_id and due_date; "
     "send_team_message needs recipient_id, title, body; complete_team_message needs id; "
     "manage_team_access needs user_id and active; edit_team_member needs user_id, name, email; update_team_reporting needs user_id and manager_id; "
-    "update_business_settings accepts only recognized business setting keys; update_ai_routing needs segments[{id,mode,provider,model}] with mode custom or shared and an already-connected provider. Never include API keys or passwords in AI proposals. Do not include confirmed in payload; the app supplies it after the user approves. "
+    "report_target_conversion needs product_id, student_name and optional converted_on; update_reminder_flow accepts send_time, emi_types and email flags, but email delivery is currently unavailable, so keep every email flag off; "
+    "edit_invoice_template accepts invoice_template_style, invoice_accent_color, invoice_location, invoice_footer_text and show flags; "
+    "update_customer needs customer_id and the full current name, phone and email, even when changing just one field; delete_customer needs customer_id; "
+    "add_team_designation needs name, role_class, permissions and data_permissions, plus id when editing; delete_team_designation needs id; "
+    "update_incentive_settings accepts pool_rate, rep_rate, manager_rate and payout_due_days; update_team_incentive_rules needs employee_id, rep_rate and manager_rate; "
+    "open_section needs section. update_business_settings accepts only recognized business setting keys; update_ai_routing needs segments[{id,mode,provider,model}] with mode custom or shared and an already-connected provider. Never include API keys or passwords in AI proposals. Do not include confirmed in payload; the app supplies it after the user approves. "
 )
 
 AI_ACTION_ROUTES = {
