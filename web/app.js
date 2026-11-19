@@ -2126,7 +2126,11 @@ async function openAIAssistant(){
       log.querySelector(".ai-thinking")?.remove();
       log.insertAdjacentHTML("beforeend",`<article class="ai-message assistant"><b>OFFTune Dex AI · ${esc(response.model)}</b><div class="ai-answer">${renderAIAnswer(response.answer)}</div></article>`);
       if(response.proposal)showProposal(response.proposal);
-      
+      else if(/\b(?:record|save|add|create|update|change|delete|assign|approve|send|sell|void|cancel|archive|remove|edit|pay|complete|set)\b|(?:করো|করে দাও|করুন|দাও|দিন|রেকর্ড|তৈরি|আপডেট|ডিলিট|মুছ|বাতিল|অ্যাসাইন|বরাদ্দ)/iu.test(text)){
+        const notice="The AI answered, but did not prepare a workspace action. Nothing was saved.";
+        showActivity("failed","No change submitted",notice);
+        const item=document.createElement("article");item.className="ai-message assistant ai-error";const heading=document.createElement("b");heading.textContent="No change submitted";const line=document.createElement("p");line.textContent=notice;item.append(heading,line);log.append(item);
+      }
     }catch(error){
       messages.pop();log.querySelector(".ai-thinking")?.remove();
       log.insertAdjacentHTML("beforeend",`<article class="ai-message assistant ai-error"><b>Could not get an answer</b><p>${esc(error.message)}</p></article>`);
