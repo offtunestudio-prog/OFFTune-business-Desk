@@ -3044,9 +3044,6 @@ async def create_invoice(request: Request):
     elif user["role"] == "employee":
         scope = " AND o.employee_id=?"
         binds.append(user["id"])
-    if user["role"] == "employee":
-        scope += " AND o.employee_id=?"
-        binds.append(user["id"])
     order = await _first(db.prepare(
         "SELECT o.id,o.order_no,o.order_date,o.currency,o.subtotal_minor,o.discount_minor,o.tax_minor,o.total_minor,"
         "o.employee_id,c.name customer,c.phone,c.email FROM orders o JOIN customers c ON c.id=o.customer_id "
