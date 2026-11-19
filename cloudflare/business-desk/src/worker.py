@@ -3215,7 +3215,7 @@ async def _invoice_detail(request: Request, invoice_id: int):
         "items": [{"product_type": x["product_type"], "sku": x["sku"], "name": x["name"],
             "batch": x["batch_name"], "quantity": x["quantity"], "unit_price": _money(x["unit_price_minor"]),
             "discount": _money(x["discount_minor"]), "line_total": _money(x["line_total_minor"])} for x in _rows(items_rows)],
-        "payment_schedule": schedule, "payment_history": payment_history, "subtotal": _money(subtotal), "discount": _money(discount),
+        "payment_schedule": schedule, "payment_history": payment_history, "prior_received": _money(int(row["installment_received_minor"] or 0)) if inst else "0.00", "subtotal": _money(subtotal), "discount": _money(discount),
         "tax": _money(tax), "total": _money(money_total), "received": _money(min(money_total, max(0, received))),
         "balance": _money(max(0, money_total - received)), "template": {"style": "studio", "accent_color": "#e51b2b"}}
     return payload, None
@@ -3236,7 +3236,12 @@ def _invoice_html(data):
         "</td><td>" + esc(item["method"]) + "</td><td>" + esc(item["reference"]) + "</td></tr>"
         for item in data.get("payment_history", [])
     )
-    history_html = ("<section class='ledger'><h2>Payments recorded</h2><table><thead><tr><th>Date</th><th>Type</th><th>Amount</th><th>Method</th><th>Reference</th></tr></thead><tbody>" + history_rows + "</tbody></table></section>") if history_rows else ""
+    history_note = ("<p>Earlier installment payments are included here. " +
+        "The received and balance amounts below apply to this invoice; prior payments: " +
+        esc(data["prior_received"]) + ".</p>") if data.get("installment_no") is not None else ""
+    history_html = ("<section class='ledger'><h2>Payment activity</h2>" + history_note +
+        "<table><thead><tr><th>Date</th><th>Type</th><th>Amount</th><th>Method</th><th>Reference</th></tr></thead><tbody>" +
+        history_rows + "</tbody></table></section>") if history_rows else ""
     logo = f"<img class='logo' src='{esc(data['invoice_logo_data'])}' alt='OFFTune logo'>" if data.get("invoice_logo_data", "").startswith("data:image/") else ""
     website = f"<a href='{esc(data['business_website'])}'>{esc(data['business_website'])}</a>" if data.get("business_website", "").startswith(("https://", "http://")) else ""
     status = "PAID" if float(data["balance"].replace(",", "")) == 0 else "BALANCE DUE"
