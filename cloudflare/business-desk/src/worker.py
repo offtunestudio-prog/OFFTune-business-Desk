@@ -4232,7 +4232,7 @@ async def ai_chat(request: Request):
         else:
             headers = {"Authorization": "Bearer " + config["api_key"], "Content-Type": "application/json"}
         response_model = config["ai_model"]
-        fallback_model = "gemini-2.5-flash-lite" if config["ai_model"].lower() == "gemini-3.5-flash-lite" else "gemini-3.5-flash-lite"
+        fallback_model = "gemini-3.5-flash-lite" if config["ai_model"].lower() == "gemini-3.1-flash-lite" else "gemini-3.1-flash-lite"
         fallback_attempted = False
         request_timeout = 20 if is_google else 45
 
