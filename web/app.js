@@ -1677,7 +1677,7 @@ async function openAIAssistant(){
   const taskFeed=document.createElement("section");taskFeed.className="ai-task-feed";taskFeed.setAttribute("aria-label","AI task history");root.querySelector(".ai-conversation").insertBefore(taskFeed,log);
   const historyKey="offtune-ai-tasks-"+String(state.user?.id||"workspace");
   let taskHistory=[];try{taskHistory=JSON.parse(sessionStorage.getItem(historyKey)||"[]");if(!Array.isArray(taskHistory))taskHistory=[];}catch(_){taskHistory=[];}
-  taskHistory=taskHistory.slice(0,8).map(item=>item.phase==="saving"?{...item,phase:"unknown",detail:"The page closed before the save could be verified. Check the workspace before retrying."}:item);
+  taskHistory=taskHistory.slice(0,8).map(item=>item.phase==="saving"?{...item,phase:"unknown",detail:"The page closed before the save could be verified. Check the workspace before retrying."}:item.phase==="review"?{...item,phase:"failed",detail:"Confirmation was not completed. No change was made."}:item);
   let activeTask=null;
   const renderTaskFeed=()=>{
     taskFeed.replaceChildren();
