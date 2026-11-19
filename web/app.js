@@ -64,7 +64,7 @@ async function api(path, options = {}) {
   if(!cacheable) return request;
   const entry={promise:request,expires:Infinity};
   readCache.set(path,entry);
-  request.then(()=>{if(readCache.get(path)===entry)entry.expires=Date.now()+10000;},()=>{if(readCache.get(path)===entry)readCache.delete(path);});
+  request.then(()=>{if(readCache.get(path)===entry)entry.expires=Date.now()+90000;},()=>{if(readCache.get(path)===entry)readCache.delete(path);});
   return structuredClone(await request);
 }
 const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body) });
@@ -202,7 +202,7 @@ async function warmWorkspaceRoutes(){
   const role=state.user?.role,permissions=new Set(state.user?.permissions||[]);
   const can=page=>role==="owner"||permissions.has(page);
   const settingsRoutes=role==="owner"?["/api/team","/api/audit","/api/settings/email-sender","/api/settings/reminders","/api/settings/razorpay","/api/settings/ai-provider"]:[];
-  const routes=[...settingsRoutes,"/api/targets?month="+encodeURIComponent(today().slice(0,7)),"/api/payments","/api/installments","/api/invoices","/api/expenses","/api/commissions","/api/commissions/payouts","/api/team/messages"];
+  const routes=["/api/targets?month="+encodeURIComponent(today().slice(0,7)),"/api/payments","/api/installments","/api/invoices","/api/expenses","/api/commissions","/api/commissions/payouts","/api/team/messages",...settingsRoutes];
   if(can("collections"))routes.push("/api/analytics/batches","/api/analytics/courses");
   if(can("followup"))routes.push("/api/followup/settings");
   if(can("analytics"))routes.push("/api/analytics/courses");
