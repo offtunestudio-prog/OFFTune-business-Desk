@@ -2122,9 +2122,10 @@ async function openAIAssistant(){
     input.value="";button.disabled=true;input.disabled=true;log.insertAdjacentHTML("beforeend",`<article class="ai-message assistant ai-thinking"><b>OFFTune Dex AI</b><p>Thinking…</p></article>`);log.scrollTop=log.scrollHeight;
     try{
       const response=await post("/api/ai/chat",{messages:messages.slice(-10),workspace_context:shareWorkspaceData?await getWorkspaceContext(true):{},external_ai_consent:true,segment:aiSegment,provider:providerPicker?.value||status.provider,model:modelPicker?.value.trim()||status.model});
-      messages.push({role:"assistant",content:response.answer});
+      const answer=response.proposal?(validateAiProposal(response.proposal)?"More details are needed before I can prepare this change. Nothing has been saved.":"This change is ready for your review. Nothing has been saved yet."):response.answer;
+      messages.push({role:"assistant",content:answer});
       log.querySelector(".ai-thinking")?.remove();
-      log.insertAdjacentHTML("beforeend",`<article class="ai-message assistant"><b>OFFTune Dex AI · ${esc(response.model)}</b><div class="ai-answer">${renderAIAnswer(response.answer)}</div></article>`);
+      log.insertAdjacentHTML("beforeend",`<article class="ai-message assistant"><b>OFFTune Dex AI · ${esc(response.model)}</b><div class="ai-answer">${renderAIAnswer(answer)}</div></article>`);
       if(response.proposal)showProposal(response.proposal);
       else if(/\b(?:record|save|add|create|update|change|delete|assign|approve|send|sell|void|cancel|archive|remove|edit|pay|complete|set)\b|(?:করো|করে দাও|করুন|দাও|দিন|রেকর্ড|তৈরি|আপডেট|ডিলিট|মুছ|বাতিল|অ্যাসাইন|বরাদ্দ)/iu.test(text)){
         const notice="The AI answered, but did not prepare a workspace action. Nothing was saved.";
