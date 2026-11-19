@@ -1485,3 +1485,25 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,[data-action]:fo
 #ai-root .ai-activity p{margin:0;color:var(--muted,#63738b);font-size:11px;line-height:1.45;overflow-wrap:anywhere}
 @keyframes ai-activity-spin{to{transform:rotate(360deg)}}
 @media(max-width:730px){#ai-root:has(.ai-workspace.is-live-mini) .ai-activity:not(.hidden){right:12px;bottom:auto;top:12px;width:min(330px,calc(100vw - 24px))}}
+
+/* A visible, session-scoped task ledger for AI proposals, saves, and failures. */
+#ai-root .ai-task-feed{flex:none;margin:0 clamp(20px,6vw,88px) 10px;border:1px solid rgba(111,91,210,.18);border-radius:14px;background:linear-gradient(120deg,rgba(118,93,215,.045),rgba(96,165,196,.04));overflow:hidden}
+#ai-root .ai-task-feed-head{display:flex;justify-content:space-between;align-items:center;padding:9px 13px;border-bottom:1px solid rgba(111,91,210,.12);color:var(--text,#17243a);font:750 11px Manrope,sans-serif}
+#ai-root .ai-task-feed-head span{color:var(--muted,#63738b);font-size:10px}
+#ai-root .ai-task-feed-list{display:grid;gap:0;max-height:150px;overflow:auto}
+#ai-root .ai-task-row{display:grid;grid-template-columns:23px minmax(0,1fr) auto;gap:8px;align-items:start;padding:8px 13px;border-bottom:1px solid rgba(111,91,210,.08)}
+#ai-root .ai-task-row:last-child{border-bottom:0}
+#ai-root .ai-task-row-icon{display:grid;place-items:center;width:20px;height:20px;border-radius:50%;background:#eae7fa;color:#6657c4;font-size:12px;font-weight:800}
+#ai-root .ai-task-row[data-phase="done"] .ai-task-row-icon{background:#e1f5e9;color:#178856}
+#ai-root .ai-task-row[data-phase="failed"] .ai-task-row-icon,#ai-root .ai-task-row[data-phase="unknown"] .ai-task-row-icon{background:#fff0e9;color:#b95739}
+#ai-root .ai-task-row[data-phase="saving"] .ai-task-row-icon{animation:ai-activity-spin 1s linear infinite}
+#ai-root .ai-task-row b{display:block;color:var(--text,#17243a);font:750 10px Manrope,sans-serif}
+#ai-root .ai-task-row p{margin:2px 0 0;color:var(--muted,#63738b);font:500 10px/1.4 Manrope,sans-serif;overflow-wrap:anywhere}
+#ai-root .ai-task-row time{color:var(--muted,#63738b);font:500 9px Manrope,sans-serif;white-space:nowrap}
+#ai-root .ai-workspace.is-live-mini .ai-task-feed{display:none}
+@media(max-width:730px){#ai-root .ai-task-feed{margin:0 9px 8px}}
+
+#ai-root .ai-task-steps{display:flex;flex-wrap:wrap;gap:4px 6px;margin:6px 0 0;padding:0;list-style:none}
+#ai-root .ai-task-steps li{padding:3px 6px;border-radius:6px;background:rgba(112,105,166,.08);color:var(--muted,#63738b);font:650 9px Manrope,sans-serif}
+#ai-root .ai-task-steps li[data-phase="done"]{background:#e1f5e9;color:#178856}
+#ai-root .ai-task-steps li[data-phase="failed"]{background:#fff0e9;color:#b95739}
