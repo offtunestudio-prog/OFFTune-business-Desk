@@ -1674,7 +1674,32 @@ async function openAIAssistant(){
   root.querySelector("[data-ai-close]").onclick=close;
   const liveToggle=root.querySelector("[data-live-toggle]"),liveState=root.querySelector("[data-live-state]"),livePanel=root.querySelector(".ai-live-panel"),liveOrb=root.querySelector("[data-live-orb]"),liveModelPicker=root.querySelector("[data-live-model]"),liveCheck=root.querySelector("[data-live-check]"),liveProposal=root.querySelector("[data-live-proposal]"),liveSizeButton=root.querySelector("[data-live-size]"),voiceStatus=root.querySelector("[data-ai-voice-status]"); let shareWorkspaceData=true; const contextToggle=root.querySelector("[data-ai-context-toggle]"); const updateContextToggle=()=>{if(!contextToggle)return;contextToggle.setAttribute("aria-pressed",shareWorkspaceData?"true":"false");contextToggle.textContent=shareWorkspaceData?"Workspace data on":"Workspace data off";contextToggle.classList.toggle("is-on",shareWorkspaceData);}; contextToggle?.addEventListener("click",()=>{shareWorkspaceData=!shareWorkspaceData;updateContextToggle();}); updateContextToggle();
   const activity=document.createElement("aside");activity.className="ai-activity hidden";activity.setAttribute("aria-live","polite");activity.setAttribute("aria-label","AI action progress");root.append(activity);
-  const showActivity=(phase,title,detail="")=>{activity.classList.remove("hidden");activity.dataset.phase=phase;activity.replaceChildren();const mark=document.createElement("span");mark.className="ai-activity-mark";mark.textContent=phase==="done"?"✓":phase==="failed"?"!":phase==="saving"?"↻":"•";const body=document.createElement("div");const heading=document.createElement("strong");heading.textContent=title;const line=document.createElement("p");line.textContent=detail;body.append(heading,line);activity.append(mark,body);};
+  const taskFeed=document.createElement("section");taskFeed.className="ai-task-feed";taskFeed.setAttribute("aria-label","AI task history");root.querySelector(".ai-conversation").insertBefore(taskFeed,log);
+  const historyKey="offtune-ai-tasks-"+String(state.user?.id||"workspace");
+  let taskHistory=[];try{taskHistory=JSON.parse(sessionStorage.getItem(historyKey)||"[]");if(!Array.isArray(taskHistory))taskHistory=[];}catch(_){taskHistory=[];}
+  taskHistory=taskHistory.slice(0,8).map(item=>item.phase==="saving"?{...item,phase:"unknown",detail:"The page closed before the save could be verified. Check the workspace before retrying."}:item);
+  let activeTask=null;
+  const renderTaskFeed=()=>{
+    taskFeed.replaceChildren();
+    const head=document.createElement("div");head.className="ai-task-feed-head";
+    const label=document.createElement("strong");label.textContent="Tasks";const count=document.createElement("span");count.textContent=taskHistory.length?String(taskHistory.length)+" recent":"Ready";
+    head.append(label,count);taskFeed.append(head);
+    const list=document.createElement("div");list.className="ai-task-feed-list";
+    for(const task of taskHistory){const row=document.createElement("article");row.className="ai-task-row";row.dataset.phase=task.phase;const icon=document.createElement("span");icon.className="ai-task-row-icon";icon.textContent=task.phase==="done"?"✓":task.phase==="failed"?"!":task.phase==="unknown"?"?":task.phase==="saving"?"↻":"•";const copy=document.createElement("div");const title=document.createElement("b");title.textContent=task.title;const detail=document.createElement("p");detail.textContent=task.detail||"";copy.append(title,detail);if(Array.isArray(task.steps)&&task.steps.length){const steps=document.createElement("ol");steps.className="ai-task-steps";for(const step of task.steps){const item=document.createElement("li");item.dataset.phase=step.phase;item.textContent=step.title;steps.append(item);}copy.append(steps);}const clock=document.createElement("time");clock.textContent=new Date(task.at).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});row.append(icon,copy,clock);list.append(row);}
+    taskFeed.append(list);
+  };
+  renderTaskFeed();
+  const showActivity=(phase,title,detail="")=>{
+    activity.classList.remove("hidden");activity.dataset.phase=phase;activity.replaceChildren();
+    const mark=document.createElement("span");mark.className="ai-activity-mark";mark.textContent=phase==="done"?"✓":phase==="failed"?"!":phase==="saving"?"↻":"•";
+    const body=document.createElement("div");const heading=document.createElement("strong");heading.textContent=title;const line=document.createElement("p");line.textContent=detail;body.append(heading,line);activity.append(mark,body);
+    if(!activeTask||["done","failed","unknown"].includes(activeTask.phase)){
+      activeTask={phase,title,detail,at:Date.now(),steps:[{phase,title,at:Date.now()}]};taskHistory.unshift(activeTask);taskHistory=taskHistory.slice(0,8);
+    }else{activeTask.phase=phase;activeTask.title=title;activeTask.detail=detail;activeTask.at=Date.now();activeTask.steps=Array.isArray(activeTask.steps)?activeTask.steps:[];if(activeTask.steps.at(-1)?.title!==title||activeTask.steps.at(-1)?.phase!==phase)activeTask.steps.push({phase,title,at:Date.now()});activeTask.steps=activeTask.steps.slice(-7);}
+    if(phase==="done"||phase==="failed"||phase==="unknown")activeTask=null;
+    try{sessionStorage.setItem(historyKey,JSON.stringify(taskHistory));}catch(_){}
+    renderTaskFeed();
+  };
   const validateAiProposal=proposal=>{
     if(proposal.operation==="add_product"){
       const payload=proposal.payload||{};
@@ -1827,7 +1852,7 @@ async function openAIAssistant(){
               result={status:"processing",message:"The app is checking the saved result. Do not claim completion yet."};
               for(let attempt=0;attempt<120;attempt++){
                 if(activity.dataset.phase==="done"){result={status:"completed",operation:current.operation,message:String(activity.textContent||"Change saved").slice(0,220)};break;}
-                if(activity.dataset.phase==="failed"){result={status:"failed",operation:current.operation,message:String(activity.textContent||"The action failed").slice(0,220)};break;}
+                if(activity.dataset.phase==="failed"||activity.dataset.phase==="unknown"){result={status:activity.dataset.phase==="unknown"?"unverified":"failed",operation:current.operation,message:String(activity.textContent||"The action could not be verified").slice(0,220)};break;}
                 if(!pendingAiAction&&current.operation==="open_section"){result={status:"completed",operation:current.operation,message:"The workspace section opened."};break;}
                 if(!pendingAiAction&&current.operation==="send_invoice"){result={status:"waiting_for_final_confirmation",message:"Invoice preview is open. A separate confirmation is required to send it."};break;}
                 if(!pendingAiAction&&current.operation==="confirm_invoice_email"){result={status:"submitted",message:String(voiceStatus.textContent||"Check invoice delivery status").slice(0,220)};break;}
@@ -1848,7 +1873,7 @@ async function openAIAssistant(){
     if(message?.serverContent?.interrupted){livePlaybackSources.forEach(source=>{try{source.stop();}catch(_){}});livePlaybackSources=[];livePlaybackAt=liveContext?.currentTime||0;setLiveState("Listening","listening");}
     if(message?.serverContent?.turnComplete){
       const request=liveUtterance;liveUtterance="";liveReply="";
-      const actionWords=/(?:\b(?:record|save|add|create|update|change|delete|assign|approve|send|schedule|reschedule|sell)\b|(?:সেল|বিক্রি|sale).{0,30}(?:কর|রেকর্ড|লিখ|save)|রেকর্ড\s*(?:কর|দাও)|যোগ কর|তৈরি কর|বদল|পরিবর্তন কর|অনুমোদন কর|পাঠা)/iu;
+      const actionWords=/(?:\b(?:record|save|add|create|update|change|delete|assign|approve|send|schedule|reschedule|sell|void|cancel|archive|remove|edit|pay|complete|set)\b|(?:সেল|বিক্রি|টার্গেট|পণ্য|প্রোডাক্ট|ইনভয়েস|পেমেন্ট|ব্যাচ|ফলো.?আপ|ইনসেনটিভ|টিম|মেসেজ|খরচ|এক্সপেন্স|সেটিংস|রিপোর্ট).{0,55}(?:কর|দাও|দিন|রেকর্ড|লিখ|যোগ|তৈরি|বদল|পরিবর্তন|আপডেট|এডিট|ডিলিট|মুছ|বাতিল|আর্কাইভ|পাঠা|অ্যাসাইন|বরাদ্দ|সেট)|(?:করো|করে দাও|করুন|দাও|দিন|আপডেট|এডিট|ডিলিট|মুছে|বাতিল|অ্যাসাইন|বরাদ্দ).{0,55}(?:সেল|বিক্রি|টার্গেট|পণ্য|প্রোডাক্ট|ইনভয়েস|পেমেন্ট|ব্যাচ|ফলো.?আপ|ইনসেনটিভ|টিম|মেসেজ|খরচ|এক্সপেন্স|সেটিংস)|রেকর্ড\s*(?:কর|দাও)|যোগ কর|তৈরি কর|বদল|পরিবর্তন কর|অনুমোদন কর|পাঠা)/iu;
       const continuing=voiceActionContext&&Date.now()-voiceActionContextAt<90000;
       if(/^(?:cancel|stop|never mind|বাতিল|থামো|বাদ দাও|না)$/iu.test(request.trim())){voiceActionContext="";voiceActionContextAt=0;}
       else if(!pendingAiAction&&!voiceActionPlanning&&request&&(actionWords.test(request)||continuing)){
@@ -1990,6 +2015,17 @@ async function openAIAssistant(){
       setLiveState(preview.can_send?"Review invoice · say ‘yes, send invoice’ or ‘no’":"Invoice needs attention before it can be sent","ready");
     }catch(error){const card=document.createElement("article");card.className="ai-message assistant ai-error";const title=document.createElement("b");title.textContent="Invoice preview unavailable";const detail=document.createElement("p");detail.textContent=error.message||"Could not open the invoice preview.";card.append(title,detail);log.append(card);log.scrollTop=log.scrollHeight;}
   };
+  const verifyAiPersisted=async(operation,payload,result)=>{
+    const id=Number(result?.id||0),requested=Number(payload?.id||payload?.order_id||payload?.invoice_id||0);
+    const expect=(test,label)=>{if(!test)throw new Error("The server accepted the request, but "+label+" could not be confirmed in the workspace. Check that section before retrying.");};
+    if(operation==="record_sale"){const rows=await api("/api/orders");expect(Array.isArray(rows)&&rows.some(row=>Number(row.id)===id&&String(row.order_no||"")===String(result.order_no||"")),"the sale");}
+    else if(operation==="void_sale"){const rows=await api("/api/orders");expect(Array.isArray(rows)&&!rows.some(row=>Number(row.id)===Number(payload.order_id||payload.id)),"the cancellation");}
+    else if(["add_product","update_product","archive_product"].includes(operation)){const rows=await api("/api/products"),product=Array.isArray(rows)?rows.find(row=>Number(row.id)===Number(id||requested)):null;expect(product&&((operation==="archive_product"&&Number(product.active)===0)||(operation!=="archive_product"&&(!payload.name||String(product.name)===String(payload.name)))),"the product change");}
+    else if(["add_batch","update_batch","remove_batch"].includes(operation)){const rows=await api("/api/batches"),batch=Array.isArray(rows)?rows.find(row=>Number(row.id)===Number(id||requested)):null;expect(operation==="remove_batch"?!batch||String(batch.status)==="archived":batch&&(!payload.name||String(batch.name)===String(payload.name)),"the batch change");}
+    else if(["record_expense","delete_expense"].includes(operation)){const rows=await api("/api/expenses");expect(Array.isArray(rows)&&(operation==="delete_expense"?!rows.some(row=>Number(row.id)===requested):rows.some(row=>Number(row.id)===id)),"the expense change");}
+    else if(["create_invoice","delete_invoice"].includes(operation)){const rows=await api("/api/invoices");expect(Array.isArray(rows)&&(operation==="delete_invoice"?!rows.some(row=>Number(row.id)===Number(payload.invoice_id||payload.id)):rows.some(row=>Number(row.id)===id)),"the invoice change");}
+    else if(operation==="send_team_message"){const rows=await api("/api/team/messages");expect(Array.isArray(rows)&&rows.some(row=>Number(row.id)===id),"the message");}
+  };
   log.addEventListener("click",async event=>{
     if(event.target.closest("[data-ai-action-cancel]")){lastActionOutcome={status:"cancelled",message:"Nothing was changed."};lastActionAt=Date.now();pendingAiAction=null;clearLiveProposal();event.target.closest(".ai-action-proposal")?.remove();voiceStatus.textContent="Action cancelled; nothing was changed.";setLiveState("Cancelled · nothing was sent","ready");showActivity("failed","Action cancelled","No change was made.");return;}
     if(!event.target.closest("[data-ai-action-confirm]"))return;
@@ -2004,13 +2040,24 @@ async function openAIAssistant(){
     }
     const endpoint=agentEndpoints[proposal.operation];if(!endpoint)return;
     const button=event.target.closest("[data-ai-action-confirm]");button.disabled=true;voiceStatus.textContent="Completing the confirmed action…";setLiveState("Completing the confirmed action…","thinking");showActivity("saving",actionLabels[proposal.operation]||"Saving change","Checking the workspace response…");
+    let acceptedResponse=false;
     try{
-      const result=await post("/api/ai/action",{operation:proposal.operation,payload:proposal.payload});if(result?.error||result?.ok===false)throw new Error(result.error||"The workspace did not save the change");if(!result||typeof result!=="object"||!(result.ok===true||Number(result.id)>0||Number(result.invoice_id)>0||Number(result.payment_id)>0))throw new Error("The workspace did not confirm this change. Check the relevant section before retrying.");if(proposal.operation==="record_sale"&&(!Number(result?.id)||!String(result?.order_no||"")||!Number(result?.invoice_id)))throw new Error("The sale response was incomplete. Check Sales before retrying.");pendingAiAction=null;clearLiveProposal();event.target.closest(".ai-action-proposal")?.remove();
+      const result=await post("/api/ai/action",{operation:proposal.operation,payload:proposal.payload});if(result?.error||result?.ok===false)throw new Error(result.error||"The workspace did not save the change");if(!result||typeof result!=="object"||!(result.ok===true||Number(result.id)>0||Number(result.invoice_id)>0||Number(result.payment_id)>0))throw new Error("The workspace did not confirm this change. Check the relevant section before retrying.");if(proposal.operation==="record_sale"&&(!Number(result?.id)||!String(result?.order_no||"")||!Number(result?.invoice_id)))throw new Error("The sale response was incomplete. Check Sales before retrying.");acceptedResponse=true;showActivity("saving","Verifying the saved result","Reading the affected workspace section…");await verifyAiPersisted(proposal.operation,proposal.payload,result);pendingAiAction=null;clearLiveProposal();event.target.closest(".ai-action-proposal")?.remove();
       const completion=proposal.operation==="record_sale"?"Sale saved. Its invoice draft is ready in Invoices.":proposal.operation==="void_sale"?"Unpaid sale cancelled. Its invoice was voided and the change was logged.":proposal.operation==="send_invoice"?"Invoice email submitted to the delivery queue.":proposal.operation==="create_invoice"?"Invoice draft created.":(actionLabels[proposal.operation]||"Action")+" completed.";
       liveSend({realtimeInput:{text:"The user confirmed the proposed action and it completed successfully. Briefly acknowledge this in the user’s language."}});
       const item=document.createElement("article");item.className="ai-message assistant";const heading=document.createElement("b");heading.textContent="Completed";const text=document.createElement("p");text.textContent=completion+(result?.invoice_no?" "+result.invoice_no:"");item.append(heading,text);log.append(item);
       showActivity("done",proposal.operation==="record_sale"?"Sale verified":"Change saved",completion+(result?.order_no?" "+result.order_no:""));lastActionOutcome={status:"completed",operation:proposal.operation,message:completion+(result?.order_no?" "+result.order_no:"")};lastActionAt=Date.now();voiceStatus.textContent=completion;setLiveState(completion,"ready");try{await loadCommon();workspaceContextPromise=null;await navigate(state.page);getWorkspaceContext(true).catch(()=>{});}catch(_){showActivity("done","Change saved","The change saved, but the screen could not refresh. Reload to see it.");voiceStatus.textContent="The change saved, but the screen could not refresh. Reload to see it.";setLiveState(voiceStatus.textContent,"ready");}
-    }catch(error){button.disabled=false;const reason=String(error?.message||"The workspace rejected this change").slice(0,180);showActivity("failed","Could not verify the change",reason);lastActionOutcome={status:"failed",operation:proposal.operation,message:reason};lastActionAt=Date.now();voiceStatus.textContent=reason;setLiveState("Could not verify · "+reason.slice(0,140),"error");const item=document.createElement("article");item.className="ai-message assistant ai-error";const heading=document.createElement("b");heading.textContent="Could not verify the change";const text=document.createElement("p");text.textContent=reason;item.append(heading,text);log.append(item);liveSend({realtimeInput:{text:"The confirmed workspace action did not return a verified success. Do not claim it was saved or unsaved; explain this error briefly and ask the user to check the workspace before retrying: "+reason}});}
+    }catch(error){
+      const unverified=acceptedResponse;
+      button.disabled=unverified;
+      if(unverified){pendingAiAction=null;clearLiveProposal();event.target.closest(".ai-action-proposal")?.querySelector(".ai-action-buttons")?.remove();}
+      const reason=String(error?.message||"The workspace rejected this change").slice(0,180);
+      showActivity(unverified?"unknown":"failed",unverified?"Save result needs checking":"Action was not saved",reason);
+      lastActionOutcome={status:unverified?"unverified":"failed",operation:proposal.operation,message:reason};lastActionAt=Date.now();
+      voiceStatus.textContent=reason;setLiveState((unverified?"Save result needs checking · ":"Could not save · ")+reason.slice(0,140),"error");
+      const item=document.createElement("article");item.className="ai-message assistant ai-error";const heading=document.createElement("b");heading.textContent=unverified?"Save result needs checking":"Action was not saved";const line=document.createElement("p");line.textContent=reason;item.append(heading,line);log.append(item);
+      liveSend({realtimeInput:{text:unverified?"The request may have saved, but verification could not confirm it. Tell the user to inspect the affected section before issuing the action again. Do not claim success or failure.":"The workspace rejected the change. Tell the user briefly why: "+reason}});
+    }
     log.scrollTop=log.scrollHeight;
   });
   const agentWorkspaceContext=async(fresh=false,search="")=>{
