@@ -1815,7 +1815,9 @@ async function openAIAssistant(){
   };
   const openVoiceWorkspace=async (operation,payload={})=>{
     const formRoutes={product:["products",()=>openProduct()],sale:["overview",()=>openSale()],payment:["overview",()=>openPayment()],batch:["batches",()=>openBatch()],expense:["expenses",()=>openExpense()],invoice:["invoices",()=>openInvoice()],team:["team",()=>openUser()]};
-    const formName=String(payload.form||"").toLowerCase().trim().replace(/^(?:add|new|create)[_\s-]+/,"").replace(/s$/,"");
+    const rawForm=String(payload.form||"").toLowerCase().trim().replace(/^(?:add|new|create)[_\s-]+/,"").replace(/[\s-]+/g,"_");
+    const formAliases={products:"product",sales:"sale",payments:"payment",batches:"batch",expenses:"expense",invoices:"invoice",users:"team",team_member:"team"};
+    const formName=formAliases[rawForm]||rawForm;
     const form=operation==="open_form"?formRoutes[formName]:null;
     const sectionName=String(payload.section||"").toLowerCase().trim().replace(/[\s-]+/g,"_");
     const sectionAliases={finance:"collections",finance_desk:"collections",follow_up:"followup",team_access:"team",course_analytics:"analytics",my_goals:"my-goals"};
@@ -1824,6 +1826,7 @@ async function openAIAssistant(){
     const permission=section==="my-goals"?"targets":section;
     if(!item||state.user?.role!=="owner"&&section!=="overview"&&!(state.user?.permissions||[]).includes(permission))throw new Error("This workspace section is not available to your account.");
     if(operation==="open_form"&&!form)throw new Error("I can open a new product, sale, payment, batch, expense, invoice or team member form.");
+    setLiveMiniMode(true);
     setLiveMiniMode(true);
     if(state.page!==section)await navigate(section);
     if(state.page!==section||$("#content .notice.error"))throw new Error("The workspace section did not finish opening.");
