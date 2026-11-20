@@ -828,11 +828,14 @@ function renderFollowupWorkspace(){
 }
 
 function renderProducts() {
-  const owner=state.user.role==="owner",showCommission=state.user.role!=="employee";
-  const rows=state.products.map(p=>`<tr><td><strong>${esc(p.sku)}</strong></td><td>${esc(p.name)}</td><td>${esc(titleCase(p.product_type))}</td><td>${p.price_set?money(p.price):"Price needed"}</td><td>${p.installment_allowed?statusBadge("active"):"—"}</td>${showCommission?`<td>${Number(p.commission_rate||0)}%</td>`:""}<td>${statusBadge(p.active?"active":"pending")}</td>${owner?`<td>${btn("Edit","edit-product:"+p.id,"button small secondary")}</td>`:""}</tr>`);
-  const drafts=state.products.filter(p=>!p.price_set).length;
-  const websiteDrafts=state.products.filter(p=>p.name.startsWith("Website draft")).length;
-  $("#content").innerHTML=`<div class="welcome-row"><div><p class="eyebrow">PRODUCT CATALOG</p><h2>What you sell</h2><p class="muted">${owner?"Manage courses, sample packs and digital products in one catalog.":"Browse the available catalog and course details."}</p></div>${owner?btn("Add product","new-product","button primary","＋"):""}</div>${owner&&drafts?`<div class="notice warning compact">${drafts} items need a confirmed price before they can be sold.</div>`:""}${owner&&websiteDrafts?`<div class="notice warning compact">${websiteDrafts} website-based draft products are inactive. Review names and public prices before activating them; offers can change.</div>`:""}<section class="panel">${table(["SKU","Product","Type","Price","Installments",...(showCommission?["Commission rate"]:[]),"Status",...(owner?["Action"]:[])],rows,owner?"Add your first product to start recording sales":"No active catalog products are available yet")}</section>`;
+  const owner=state.user.role==="owner";
+  const label={course:"Course",sample_pack:"Sample pack",digital_product:"Digital product"};
+  const priceOf=value=>{const n=Number(String(value??"").replace(/,/g,""));return Number.isFinite(n)&&n>0?money(n):"Set a price";};
+  const rows=state.products.map(p=>{
+    const price=priceOf(p.price),sellable=!!p.active&&price!=="Set a price";
+    return `<tr><td><strong>${esc(p.name)}</strong><small class="subcell">Code: ${esc(p.sku)}</small></td><td>${esc(label[p.product_type]||"Product")}</td><td><strong>${price}</strong></td><td>${p.installment_allowed?"Available":"Full payment"}</td><td>${statusBadge(sellable?"active":"pending")}</td>${owner?`<td>${btn("Edit","edit-product:"+p.id,"button small secondary")}</td>`:""}</tr>`;
+  });
+  $("#content").innerHTML=`<div class="welcome-row"><div><p class="eyebrow">YOUR CATALOG</p><h2>Courses & products</h2><p class="muted">Set a clear selling price for each course, digital product or sample pack.</p></div>${owner?btn("Add course or product","new-product","button primary","＋"):""}</div><section class="panel">${table(["Course or product","Type","Selling price","Payment","Status",...(owner?["Action"]:[])],rows,owner?"Add your first course or product":"No products available")}</section>`;
 }
 function openBatchStudents(batchId){
   const batch=state.batches.find(item=>Number(item.id)===Number(batchId));if(!batch)return;
@@ -2321,11 +2324,16 @@ function openInstallmentDate(installmentId) {
   outcome?.addEventListener("change",syncRequired);syncRequired();
 }
 function openProduct(productId=null) {
-  const p=productId?state.products.find(x=>x.id===productId):null;
+  const p=productId?state.products.find(x=>Number(x.id)===Number(productId)):null;
   const type=p?.product_type||"course", defaultPool=state.incentiveRules?.pool_rate??5;
-  const body=`<div class="form-grid"><label>Product name<input name="name" required maxlength="140" value="${esc(p?.name||"")}"></label><label>SKU<input name="sku" required maxlength="40" value="${esc(p?.sku||"")}"></label><label>Type<select name="product_type"><option value="course" ${type==="course"?"selected":""}>Course</option><option value="sample_pack" ${type==="sample_pack"?"selected":""}>Sample pack</option><option value="digital_product" ${type==="digital_product"?"selected":""}>Digital product</option></select></label><label>Price (${esc(state.settings.currency||"INR")})<input name="price" type="number" min="0" step="0.01" required value="${p?.price_set?p.price:""}"></label><label>Commission pool (%)<input name="commission_rate" type="number" min="0" max="100" step="0.01" value="${p?.commission_rate??defaultPool}" required><small>${p?"This course’s rate; future sales only":"Starts at the Team & access default"}</small></label><label class="check-label"><input name="installment_allowed" type="checkbox" ${p?.installment_allowed?"checked":""}> Allow installments</label>${p?`<label class="check-label full-row"><input name="active" type="checkbox" ${p.active?"checked":""}> Available for new sales (requires a price above zero)</label>`:""}</div>${p?.name.startsWith("Example")?`<div class="notice warning compact">Example price provided for demonstration. Confirm before using it for a real sale.</div>`:""}`;
-  openModal(p?"Update product":"Add product",body+(p?.name.startsWith("Website draft")?`<div class="notice warning compact">This draft came from the OFFTune website. Verify its current name and price before activating it for sales.</div>`:""),async form=>{
-    const data={name:form.name.value,sku:form.sku.value,product_type:form.product_type.value,price:Number(form.price.value),commission_rate:Number(form.commission_rate.value),installment_allowed:form.installment_allowed.checked};
+  const existingPrice=Number(String(p?.price??"").replace(/,/g,""));
+  const priceValue=Number.isFinite(existingPrice)&&existingPrice>0?existingPrice:"";
+  const code=p?.sku||("ITEM-"+Date.now().toString(36).toUpperCase());
+  const body=`<div class="form-grid"><label class="full-row">Name<input name="name" required maxlength="140" value="${esc(p?.name||"")}" placeholder="e.g. Music Production Course"></label><label>What are you selling?<select name="product_type"><option value="course" ${type==="course"?"selected":""}>Course</option><option value="digital_product" ${type==="digital_product"?"selected":""}>Digital product · book, download or project</option><option value="sample_pack" ${type==="sample_pack"?"selected":""}>Sample pack</option></select></label><label>Selling price (${esc(state.settings.currency||"INR")})<input name="price" type="number" min="0.01" step="0.01" required value="${priceValue}" placeholder="0.00"></label><label class="check-label full-row"><input name="installment_allowed" type="checkbox" ${p?.installment_allowed?"checked":""}> Let customers pay in installments</label><details class="full-row"><summary>More options</summary><div class="form-grid"><label>Internal product code<input name="sku" maxlength="40" value="${esc(code)}"><small>Used to identify this item in records. You can leave the generated code.</small></label><label>Commission pool (%)<input name="commission_rate" type="number" min="0" max="100" step="0.01" value="${p?.commission_rate??defaultPool}" required></label>${p?`<label class="check-label full-row"><input name="active" type="checkbox" ${p.active?"checked":""}> Available for new sales</label>`:""}</div></details></div>`;
+  openModal(p?"Edit course or product":"Add course or product",body,async form=>{
+    const price=Number(form.price.value);
+    if(!Number.isFinite(price)||price<=0)throw new Error("Enter a selling price greater than zero.");
+    const data={name:form.name.value.trim(),sku:form.sku.value.trim()||code,product_type:form.product_type.value,price,commission_rate:Number(form.commission_rate.value),installment_allowed:form.installment_allowed.checked};
     if(p)await post("/api/products/update",{...data,id:p.id,active:form.active.checked});else await post("/api/products",data);
   });
 }
