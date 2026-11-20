@@ -1821,6 +1821,7 @@ async function openAIAssistant(){
     const permission=section==="my-goals"?"targets":section;
     if(!item||state.user?.role!=="owner"&&section!=="overview"&&!(state.user?.permissions||[]).includes(permission))throw new Error("This workspace section is not available to your account.");
     if(operation==="open_form"&&!form)throw new Error("I can open a new product, sale, payment, batch, expense, invoice or team member form.");
+    setLiveMiniMode(true);
     if(state.page!==section)await navigate(section);
     if(state.page!==section||$("#content .notice.error"))throw new Error("The workspace section did not finish opening.");
     if(form){await state.commonPromise;form[1]();if(!$("#modal-root")?.textContent?.trim())throw new Error("The form did not open.");}
