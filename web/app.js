@@ -1815,8 +1815,11 @@ async function openAIAssistant(){
   };
   const openVoiceWorkspace=async (operation,payload={})=>{
     const formRoutes={product:["products",()=>openProduct()],sale:["overview",()=>openSale()],payment:["overview",()=>openPayment()],batch:["batches",()=>openBatch()],expense:["expenses",()=>openExpense()],invoice:["invoices",()=>openInvoice()],team:["team",()=>openUser()]};
-    const form=operation==="open_form"?formRoutes[String(payload.form||"").toLowerCase()]:null;
-    const section=form?form[0]:String(payload.section||"").toLowerCase();
+    const formName=String(payload.form||"").toLowerCase().trim().replace(/^(?:add|new|create)[_\s-]+/,"").replace(/s$/,"");
+    const form=operation==="open_form"?formRoutes[formName]:null;
+    const sectionName=String(payload.section||"").toLowerCase().trim().replace(/[\s-]+/g,"_");
+    const sectionAliases={finance:"collections",finance_desk:"collections",follow_up:"followup",team_access:"team",course_analytics:"analytics",my_goals:"my-goals"};
+    const section=form?form[0]:(sectionAliases[sectionName]||sectionName);
     const item=navItems().find(entry=>entry.id===section);
     const permission=section==="my-goals"?"targets":section;
     if(!item||state.user?.role!=="owner"&&section!=="overview"&&!(state.user?.permissions||[]).includes(permission))throw new Error("This workspace section is not available to your account.");
@@ -1829,7 +1832,7 @@ async function openAIAssistant(){
     showActivity("done",form?"Workspace form opened":"Workspace section opened",detail);
     lastActionOutcome={status:"completed",operation,message:detail};lastActionAt=Date.now();
     voiceStatus.textContent=detail;setLiveState(detail,"ready");
-    return {status:"completed",operation,section,form:form?String(payload.form).toLowerCase():undefined,message:detail};
+    return {status:"completed",operation,section,form:form?formName:undefined,message:detail};
   };
   const receiveLiveMessage=async message=>{
     const parts=message?.serverContent?.modelTurn?.parts||[];
