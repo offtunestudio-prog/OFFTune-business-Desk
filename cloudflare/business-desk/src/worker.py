@@ -275,7 +275,7 @@ async def products(request: Request):
         "FROM products WHERE active=1 OR ?='owner' ORDER BY active DESC,name"
     ).bind(user["role"]).all()
     return [{"id": r["id"], "sku": r["sku"], "name": r["name"],
-             "product_type": r["product_type"], "price": _money(r["price_minor"]),
+             "product_type": r["product_type"], "price": int(r["price_minor"] or 0) / 100,
              "currency": r["currency"], "installment_allowed": bool(r["installment_allowed"]),
              "active": bool(r["active"]), "price_set": int(r["price_minor"]) > 0,
              **({"commission_rate": r["commission_rate"]} if user["role"] != "employee" else {})}
@@ -320,20 +320,23 @@ async def update_product(request: Request):
     try:
         data = await request.json()
         product_id = int(data.get("id", 0))
-        changed_fields = ("name", "sku", "price", "commission_rate", "installment_allowed", "active")
+        changed_fields = ("name", "sku", "product_type", "price", "commission_rate", "installment_allowed", "active")
         if product_id < 1 or not any(key in data for key in changed_fields):
             raise ValueError("Choose a product and at least one field to change")
     except (ValueError, TypeError) as exc:
         return JSONResponse({"error": str(exc) or "Check the product details"}, status_code=400)
     db = _env(request).DB
     product = await _first(db.prepare(
-        "SELECT id,name,sku,price_minor,commission_rate,installment_allowed,active FROM products WHERE id=?"
+        "SELECT id,name,sku,product_type,price_minor,commission_rate,installment_allowed,active FROM products WHERE id=?"
     ).bind(product_id))
     if not product:
         return JSONResponse({"error": "Product not found"}, status_code=404)
     try:
         name = str(data["name"] if "name" in data else product["name"]).strip()[:160]
         sku = str(data["sku"] if "sku" in data else product["sku"]).strip().upper()[:40]
+        kind = str(data["product_type"] if "product_type" in data else product["product_type"])
+        if kind not in ("course", "sample_pack", "digital_product"):
+            raise ValueError("Choose Course, Sample pack or Digital product")
         price = _minor(data["price"]) if "price" in data else int(product["price_minor"])
         rate = Decimal(str(data["commission_rate"] if "commission_rate" in data else product["commission_rate"]))
         installment_allowed = int(_boolean(data["installment_allowed"])) if "installment_allowed" in data else int(product["installment_allowed"])
@@ -345,8 +348,8 @@ async def update_product(request: Request):
     except (ValueError, TypeError, InvalidOperation) as exc:
         return JSONResponse({"error": str(exc) or "Check the product details"}, status_code=400)
     try:
-        await db.prepare("UPDATE products SET name=?,sku=?,price_minor=?,commission_rate=?,installment_allowed=?,active=? WHERE id=?").bind(
-            name, sku, price, float(rate), installment_allowed, active, product_id).run()
+        await db.prepare("UPDATE products SET name=?,sku=?,product_type=?,price_minor=?,commission_rate=?,installment_allowed=?,active=? WHERE id=?").bind(
+            name, sku, kind, price, float(rate), installment_allowed, active, product_id).run()
         await db.prepare("INSERT INTO audit_log(actor_id,action,entity,entity_id) VALUES(?,'updated','product',?)").bind(user["id"], product_id).run()
     except Exception:
         return JSONResponse({"error": "Product was not updated. Check that its SKU is unique and try again."}, status_code=409)
