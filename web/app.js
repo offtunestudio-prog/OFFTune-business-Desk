@@ -1830,7 +1830,7 @@ async function openAIAssistant(){
     if(state.page!==section)await navigate(section);
     if(state.page!==section||$("#content .notice.error"))throw new Error("The workspace section did not finish opening.");
     if(form){await state.commonPromise;form[1]();if(!$("#modal-root")?.textContent?.trim())throw new Error("The form did not open.");}
-    const detail=form?"Opened the new "+String(payload.form).toLowerCase()+" form. Tell me what to enter next.":"Opened "+item.label+". Tell me the next step.";
+    const detail=form?"Opened the new "+formName+" form. Tell me what to enter next.":"Opened "+item.label+". Tell me the next step.";
     showActivity("done",form?"Workspace form opened":"Workspace section opened",detail);
     lastActionOutcome={status:"completed",operation,message:detail};lastActionAt=Date.now();
     voiceStatus.textContent=detail;setLiveState(detail,"ready");
