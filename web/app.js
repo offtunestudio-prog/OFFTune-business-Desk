@@ -1813,6 +1813,23 @@ async function openAIAssistant(){
       liveSend({clientContent:{turns:[{role:"user",parts:[{text:"The app could not prepare that action: "+reason+". Tell the user nothing has been confirmed as saved."}]}],turnComplete:true}});
     }finally{if(planningRun===liveRunId)voiceActionPlanning=false;}
   };
+  const openVoiceWorkspace=async (operation,payload={})=>{
+    const formRoutes={product:["products",()=>openProduct()],sale:["overview",()=>openSale()],payment:["overview",()=>openPayment()],batch:["batches",()=>openBatch()],expense:["expenses",()=>openExpense()],invoice:["invoices",()=>openInvoice()],team:["team",()=>openUser()]};
+    const form=operation==="open_form"?formRoutes[String(payload.form||"").toLowerCase()]:null;
+    const section=form?form[0]:String(payload.section||"").toLowerCase();
+    const item=navItems().find(entry=>entry.id===section);
+    const permission=section==="my-goals"?"targets":section;
+    if(!item||state.user?.role!=="owner"&&section!=="overview"&&!(state.user?.permissions||[]).includes(permission))throw new Error("This workspace section is not available to your account.");
+    if(operation==="open_form"&&!form)throw new Error("I can open a new product, sale, payment, batch, expense, invoice or team member form.");
+    if(state.page!==section)await navigate(section);
+    if(state.page!==section||$("#content .notice.error"))throw new Error("The workspace section did not finish opening.");
+    if(form){await state.commonPromise;form[1]();if(!$("#modal-root")?.textContent?.trim())throw new Error("The form did not open.");}
+    const detail=form?"Opened the new "+String(payload.form).toLowerCase()+" form. Tell me what to enter next.":"Opened "+item.label+". Tell me the next step.";
+    showActivity("done",form?"Workspace form opened":"Workspace section opened",detail);
+    lastActionOutcome={status:"completed",operation,message:detail};lastActionAt=Date.now();
+    voiceStatus.textContent=detail;setLiveState(detail,"ready");
+    return {status:"completed",operation,section,form:form?String(payload.form).toLowerCase():undefined,message:detail};
+  };
   const receiveLiveMessage=async message=>{
     const parts=message?.serverContent?.modelTurn?.parts||[];
     for(const part of parts){
@@ -1861,7 +1878,7 @@ async function openAIAssistant(){
             }
           }else result={status:"invalid_decision",message:"Say approve or cancel."};
         }else if(call.name==="lookup_workspace_data"){if(!shareWorkspaceData)result={status:"workspace_data_off",message:"Workspace data sharing is off. Ask the user to turn it on before answering with business records."};else{try{const ctx=await getWorkspaceContext(true,String(proposal.query||""));const section=String(proposal.section||"overview");const keys={overview:["dashboard","reports","targets","orders","emi_this_month"],targets:["targets","reports"],collections:["orders","customers","invoices","installments","emi_this_month","reports"],finance:["orders","customers","invoices","installments","emi_this_month","reports"],followup:["installments","emi_this_month"],products:["products","batches"],incentives:["incentives"],invoices:["invoices","orders"],team:["team"],reports:["reports","monthly_reports","dashboard","course_analytics","batch_analytics"],batches:["batches","products"],analytics:["course_analytics","batch_analytics","reports","monthly_reports"],messages:["messages"],expenses:["expenses","reports"],settings:["business_settings","ai_routing"]}[section]||["dashboard","reports","emi_this_month"];result={status:"ok",section,as_of:today(),record_query:ctx.record_query,record_coverage:ctx.record_coverage,data:Object.fromEntries(keys.map(key=>[key,ctx[key]]))};}catch(_){result={status:"unavailable",message:"Workspace records could not be loaded right now."};}}}
-        else if(call.name==="propose_workspace_action"&&proposal.operation&&proposal.payload&&proposal.summary&&!pendingAiAction&&!accepted){const validation=validateAiProposal(proposal);if(validation){result={status:"missing_or_invalid_details",message:validation};showActivity("failed","More details needed",validation);setLiveState(validation,"error");}else{showProposal(proposal);accepted=true;result={status:"waiting_for_user_confirmation",summary:proposal.summary,approval_instruction:"Repeat the exact proposed action briefly and ask the user to say yes to confirm or cancel. Wait for the spoken answer."};setLiveState("Say yes to confirm or cancel","ready");}}
+        else if(call.name==="propose_workspace_action"&&["open_section","open_form"].includes(proposal.operation)&&!pendingAiAction&&!accepted){try{result=await openVoiceWorkspace(proposal.operation,proposal.payload||{});accepted=true;}catch(error){const reason=String(error?.message||"Could not open the workspace").slice(0,180);showActivity("failed","Workspace did not open",reason);result={status:"failed",message:reason};}}else if(call.name==="propose_workspace_action"&&proposal.operation&&proposal.payload&&proposal.summary&&!pendingAiAction&&!accepted){const validation=validateAiProposal(proposal);if(validation){result={status:"missing_or_invalid_details",message:validation};showActivity("failed","More details needed",validation);setLiveState(validation,"error");}else{showProposal(proposal);accepted=true;result={status:"waiting_for_user_confirmation",summary:proposal.summary,approval_instruction:"Repeat the exact proposed action briefly and ask the user to say yes to confirm or cancel. Wait for the spoken answer."};setLiveState("Say yes to confirm or cancel","ready");}}
         else if(pendingAiAction||accepted)result={status:"another_action_is_already_waiting_for_review"};
         return {id:call.id,name:call.name,response:result};
       }));
